@@ -28,7 +28,7 @@ import {
   Check,
 } from 'lucide-react';
 import { getDiscount, getStorefrontImage, type Product } from '@/data';
-import { createCheckoutOrder, getProductById, getProducts } from '@/services/api';
+import { createCheckoutOrder, getBackendAssetUrl, getProductById, getProducts } from '@/services/api';
 import '@/index.css';
 
 type CartItem = Product & { quantity: number; size: string };
@@ -190,7 +190,9 @@ function Layout({
 
 function ProductImage({ product, src, alt }: { product: Product; src: string; alt: string }) {
   const fallbackImage = getStorefrontImage(product.id);
-  const safeSource = /placeholder\.(?:com|co)(?:\/|$)/i.test(src) ? fallbackImage : src;
+  const safeSource = /placeholder\.(?:com|co)(?:\/|$)/i.test(src)
+    ? fallbackImage
+    : getBackendAssetUrl(src) || fallbackImage;
   const [imageSource, setImageSource] = useState(safeSource);
   const [fallbackFailed, setFallbackFailed] = useState(false);
 

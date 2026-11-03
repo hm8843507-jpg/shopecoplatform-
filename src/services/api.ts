@@ -1,13 +1,36 @@
 import { getStorefrontImage, type Product } from '@/data';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_URL;
+const configuredApiBaseUrl = import.meta.env.VITE_API_URL?.trim();
 if (!configuredApiBaseUrl) {
-  throw new Error('VITE_API_URL must be configured.');
+  const message = 'VITE_API_URL is missing. Set it to the deployed shop backend URL.';
+  if (import.meta.env.PROD) console.error(message);
+  throw new Error(message);
 }
-const normalizedApiBaseUrl = configuredApiBaseUrl.replace(/\/+$/, '');
-const API_BASE_URL = /\/api$/i.test(normalizedApiBaseUrl)
-  ? normalizedApiBaseUrl
-  : `${normalizedApiBaseUrl}/api`;
+const markdownUrl = configuredApiBaseUrl.match(/https?:\/\/[^\s\])]+/i)?.[0];
+const cleanedApiBaseUrl = (markdownUrl ?? configuredApiBaseUrl)
+  .replace(/[\[\]()]/g, '')
+  .trim();
+const backendBaseUrl = cleanedApiBaseUrl
+  .replace(/\/+$/, '')
+  .replace(/\/api$/i, '');
+const API_BASE_URL = `${backendBaseUrl}/api`;
+
+export function getBackendAssetUrl(path: string): string {
+  const assetPath = path.trim();
+  if (!assetPath) return '';
+  if (/^data:image\//i.test(assetPath)) return assetPath;
+
+  try {
+    const assetUrl = new URL(assetPath.replace(/^\/+/, ''), `${backendBaseUrl}/`);
+    if (assetUrl.protocol === 'https:' || (import.meta.env.DEV && assetUrl.protocol === 'http:')) {
+      return assetUrl.href;
+    }
+  } catch {
+    return '';
+  }
+
+  return '';
+}
 
 type ProductPayload = {
   id?: unknown;
@@ -55,14 +78,8 @@ function getProductImage(product: ProductPayload, id: string): string {
     if (typeof candidate !== 'string') continue;
     const image = candidate.trim();
     if (!image || /placeholder\.(?:com|co)(?:\/|$)/i.test(image)) continue;
-    if (/^data:image\//i.test(image)) return image;
-
-    try {
-      const url = new URL(image);
-      if (url.protocol === 'https:') return image;
-    } catch {
-      continue;
-    }
+    const assetUrl = getBackendAssetUrl(image);
+    if (assetUrl) return assetUrl;
   }
 
   return getStorefrontImage(id);
