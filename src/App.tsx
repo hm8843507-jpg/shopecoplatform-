@@ -27,11 +27,12 @@ import {
   X,
   Check,
 } from 'lucide-react';
-import { getDiscount, getStorefrontImage, type Product } from '@/data';
+import { getDiscount, type Product } from '@/data';
 import { createCheckoutOrder, getBackendAssetUrl, getProductById, getProducts } from '@/services/api';
 import '@/index.css';
 
 type CartItem = Product & { quantity: number; size: string };
+const imageFallback = '/image-placeholder.svg';
 type CatalogProps = {
   products: Product[];
   loading: boolean;
@@ -188,21 +189,17 @@ function Layout({
   );
 }
 
-function ProductImage({ product, src, alt }: { product: Product; src: string; alt: string }) {
-  const fallbackImage = getStorefrontImage(product.id);
-  const safeSource = /placeholder\.(?:com|co)(?:\/|$)/i.test(src)
-    ? fallbackImage
-    : getBackendAssetUrl(src) || fallbackImage;
-  const [imageSource, setImageSource] = useState(safeSource);
+function SafeImage({ src, alt }: { src: string; alt: string }) {
+  const [imageSource, setImageSource] = useState(src || imageFallback);
   const [fallbackFailed, setFallbackFailed] = useState(false);
 
   useEffect(() => {
-    setImageSource(safeSource);
+    setImageSource(src || imageFallback);
     setFallbackFailed(false);
-  }, [safeSource]);
+  }, [src]);
 
   if (fallbackFailed) {
-    const label = alt || 'Product image';
+    const label = alt || 'Image';
     return <span className="state-message" role="img" aria-label={`${label} unavailable`}>{label} unavailable</span>;
   }
 
@@ -211,11 +208,18 @@ function ProductImage({ product, src, alt }: { product: Product; src: string; al
       src={imageSource}
       alt={alt}
       onError={() => {
-        if (imageSource !== fallbackImage) setImageSource(fallbackImage);
+        if (imageSource !== imageFallback) setImageSource(imageFallback);
         else setFallbackFailed(true);
       }}
     />
   );
+}
+
+function ProductImage({ product, src, alt }: { product: Product; src: string; alt: string }) {
+  const safeSource = /placeholder\.(?:com|co)(?:\/|$)/i.test(src)
+    ? imageFallback
+    : getBackendAssetUrl(src) || imageFallback;
+  return <SafeImage key={product.id} src={safeSource} alt={alt} />;
 }
 
 function ProductCard({ product, onAdd }: { product: Product; onAdd: (product: Product) => void }) {
@@ -291,7 +295,7 @@ function Home({
             </div>
           </div>
           <div className="hero-image">
-            <img src="https://images.pexels.com/photos/15024989/pexels-photo-15024989.jpeg?auto=compress&cs=tinysrgb&h=650&w=940" alt="Fashionable couple" />
+            <SafeImage src="https://images.pexels.com/photos/15024989/pexels-photo-15024989.jpeg?auto=compress&cs=tinysrgb&h=650&w=940" alt="Fashionable couple" />
             <span className="sparkle sparkle-one">✦</span><span className="sparkle sparkle-two">✦</span>
           </div>
         </div>
@@ -323,7 +327,7 @@ function StyleBrowse() {
   return (
     <section className="shell style-section">
       <h2>BROWSE BY DRESS STYLE</h2>
-      <div className="style-grid">{styles.map((style) => <Link to="/shop" className="style-card" key={style.name}><img src={style.image} alt={style.name} /><span>{style.name}</span></Link>)}</div>
+      <div className="style-grid">{styles.map((style) => <Link to="/shop" className="style-card" key={style.name}><SafeImage src={style.image} alt={style.name} /><span>{style.name}</span></Link>)}</div>
     </section>
   );
 }

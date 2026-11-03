@@ -6,9 +6,12 @@ if (!configuredApiBaseUrl) {
   if (import.meta.env.PROD) console.error(message);
   throw new Error(message);
 }
-const markdownUrl = configuredApiBaseUrl.match(/https?:\/\/[^\s\])]+/i)?.[0];
+const markdownUrl = configuredApiBaseUrl.match(/https?:\/\/[^\s)]+/i)?.[0];
 const cleanedApiBaseUrl = (markdownUrl ?? configuredApiBaseUrl)
-  .replace(/[\[\]()]/g, '')
+  .split('[').join('')
+  .split(']').join('')
+  .split('(').join('')
+  .split(')').join('')
   .trim();
 const backendBaseUrl = cleanedApiBaseUrl
   .replace(/\/+$/, '')
@@ -20,8 +23,16 @@ export function getBackendAssetUrl(path: string): string {
   if (!assetPath) return '';
   if (/^data:image\//i.test(assetPath)) return assetPath;
 
+  const cleanedAssetPath = assetPath
+    .split('[').join('')
+    .split(']').join('')
+    .split('(').join('')
+    .split(')').join('')
+    .trim();
+  if (/^https?:\/\//i.test(cleanedAssetPath)) return cleanedAssetPath;
+
   try {
-    const assetUrl = new URL(assetPath.replace(/^\/+/, ''), `${backendBaseUrl}/`);
+    const assetUrl = new URL(cleanedAssetPath.replace(/^\/+/, ''), `${backendBaseUrl}/`);
     if (assetUrl.protocol === 'https:' || (import.meta.env.DEV && assetUrl.protocol === 'http:')) {
       return assetUrl.href;
     }
@@ -186,18 +197,10 @@ export async function getProductById(id: string, signal?: AbortSignal): Promise<
     throw new Error('A product ID is required.');
   }
 
-  try {
-    const payload = await request(`/products/${encodeURIComponent(productId)}`, signal);
-    const product = isRecord(payload) && isRecord(payload.product) ? payload.product : payload;
-    return toProduct(product);
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 404) throw error;
-
-    const products = await getProducts(signal);
-    const product = products.find((candidate) => candidate.id === productId);
-    if (!product) throw new Error('Product not found.');
-    return product;
-  }
+  const products = await getProducts(signal);
+  const product = products.find((candidate) => candidate.id === productId);
+  if (!product) throw new Error('Product not found.');
+  return product;
 }
 
 export type CheckoutItem = {
