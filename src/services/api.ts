@@ -203,6 +203,95 @@ export async function getProductById(id: string, signal?: AbortSignal): Promise<
   return product;
 }
 
+export type CartLine = {
+  cartItemId: string;
+  product: Product;
+  quantity: number;
+  size: string;
+};
+
+function toCartLine(payload: unknown): CartLine {
+  if (!isRecord(payload)) {
+    throw new Error('The cart API returned an invalid item.');
+  }
+
+  const id = payload.id ?? payload._id;
+  if (
+    (typeof id !== 'string' && typeof id !== 'number') ||
+    typeof payload.quantity !== 'number' ||
+    !Number.isInteger(payload.quantity) ||
+    payload.quantity < 1 ||
+    typeof payload.size !== 'string'
+  ) {
+    throw new Error('The cart API returned an item with missing required fields.');
+  }
+
+  return {
+    cartItemId: String(id),
+    product: toProduct(payload.product),
+    quantity: payload.quantity,
+    size: payload.size,
+  };
+}
+
+function getCartLine(payload: unknown): CartLine {
+  if (!isRecord(payload) || !isRecord(payload.item)) {
+    throw new Error('The shop server returned an invalid cart response.');
+  }
+  return toCartLine(payload.item);
+}
+
+export async function getCart(cartId: string): Promise<CartLine[]> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  const payload = await request(`/cart?${query.toString()}`);
+  if (!isRecord(payload) || !Array.isArray(payload.items)) {
+    throw new Error('The shop server returned an invalid cart.');
+  }
+  return payload.items.map(toCartLine);
+}
+
+export async function addCartItem(
+  cartId: string,
+  productId: string,
+  quantity: number,
+  size: string
+): Promise<CartLine> {
+  const payload = await request('/cart', undefined, {
+    method: 'POST',
+    body: JSON.stringify({
+      cart_id: cartId,
+      product_id: productId,
+      quantity,
+      size,
+    }),
+  });
+  return getCartLine(payload);
+}
+
+export async function updateCartItem(
+  cartId: string,
+  itemId: string,
+  quantity: number
+): Promise<CartLine> {
+  const payload = await request(`/cart/${encodeURIComponent(itemId)}`, undefined, {
+    method: 'PUT',
+    body: JSON.stringify({ cart_id: cartId, quantity }),
+  });
+  return getCartLine(payload);
+}
+
+export async function removeCartItem(cartId: string, itemId: string): Promise<void> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  await request(`/cart/${encodeURIComponent(itemId)}?${query.toString()}`, undefined, {
+    method: 'DELETE',
+  });
+}
+
+export async function clearCart(cartId: string): Promise<void> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  await request(`/cart?${query.toString()}`, undefined, { method: 'DELETE' });
+}
+
 export type CheckoutItem = {
   product_id: string;
   quantity: number;

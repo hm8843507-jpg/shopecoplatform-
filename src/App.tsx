@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BrowserRouter,
   Link,
@@ -28,17 +28,39 @@ import {
   Check,
 } from 'lucide-react';
 import { getDiscount, type Product } from '@/data';
-import { createCheckoutOrder, getBackendAssetUrl, getProductById, getProducts } from '@/services/api';
+import {
+  addCartItem as addCartItemRequest,
+  clearCart as clearCartRequest,
+  createCheckoutOrder,
+  getBackendAssetUrl,
+  getCart,
+  getProductById,
+  getProducts,
+  removeCartItem as removeCartItemRequest,
+  updateCartItem as updateCartItemRequest,
+} from '@/services/api';
 import '@/index.css';
 
-type CartItem = Product & { quantity: number; size: string };
+type CartItem = Product & { cartItemId?: string; quantity: number; size: string };
 const imageFallback = '/image-placeholder.svg';
+const cartIdStorageKey = 'shop-cart-id';
 type CatalogProps = {
   products: Product[];
   loading: boolean;
   error: string;
   onRetry: () => void;
 };
+
+function getOrCreateCartId(): string {
+  const storedCartId = localStorage.getItem(cartIdStorageKey);
+  if (storedCartId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storedCartId)) {
+    return storedCartId.toLowerCase();
+  }
+
+  const cartId = crypto.randomUUID();
+  localStorage.setItem(cartIdStorageKey, cartId);
+  return cartId;
+}
 
 function readStoredCart(): CartItem[] {
   const raw = localStorage.getItem('shop-cart');
@@ -160,10 +182,16 @@ function Footer() {
 function Layout({
   cart,
   storageError,
+  cartError,
+  cartSyncing,
+  cartBusy,
   children,
 }: {
   cart: CartItem[];
   storageError: string;
+  cartError: string;
+  cartSyncing: boolean;
+  cartBusy: boolean;
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -183,6 +211,9 @@ function Layout({
         </div>
       )}
       {storageError && <p className="state-message error-message shell" role="alert">{storageError}</p>}
+      {cartError && <p className="state-message error-message shell" role="alert">{cartError}</p>}
+      {cartSyncing && <p className="state-message shell" role="status">Syncing your cart...</p>}
+      {!cartSyncing && cartBusy && <p className="state-message shell" role="status">Updating your cart...</p>}
       {children}
       <Footer />
     </>
@@ -704,12 +735,18 @@ function ProductPage({ onAdd }: { onAdd: (product: Product, size: string, quanti
 
 function CartPage({
   cart,
-  setCart,
   onCheckout,
+  onRemove,
+  onUpdateQuantity,
+  cartSyncing,
+  cartBusy,
 }: {
   cart: CartItem[];
-  setCart: Dispatch<SetStateAction<CartItem[]>>;
   onCheckout: (customerName: string, items: CartItem[]) => Promise<string>;
+  onRemove: (item: CartItem) => Promise<void>;
+  onUpdateQuantity: (item: CartItem, amount: number) => Promise<void>;
+  cartSyncing: boolean;
+  cartBusy: boolean;
 }) {
   const [customerName, setCustomerName] = useState('');
   const [checkoutError, setCheckoutError] = useState('');
@@ -732,23 +769,6 @@ function CartPage({
       setSubmitting(false);
     }
   };
-  const updateQuantity = (id: string, size: string, amount: number) =>
-    setCart((items) => {
-      const selectedItem = items.find((item) => item.id === id && item.size === size);
-      if (!selectedItem) return items;
-      const productQuantity = items
-        .filter((item) => item.id === id)
-        .reduce((sum, item) => sum + item.quantity, 0);
-      if (amount > 0 && selectedItem.stock !== undefined && productQuantity >= selectedItem.stock) {
-        return items;
-      }
-      return items.map((item) =>
-        item.id === id && item.size === size
-          ? { ...item, quantity: Math.max(1, item.quantity + amount) }
-          : item
-      );
-    });
-
   return (
     <main>
       <Breadcrumb current="Cart" />
@@ -763,14 +783,14 @@ function CartPage({
               <div className="cart-item" key={`${item.id}-${item.size}`}>
                 <ProductImage product={item} src={item.image} alt={item.name} />
                 <div className="cart-item-info"><Link to={`/product/${encodeURIComponent(item.id)}`}><h3>{item.name}</h3></Link><span>Size: {item.size}</span><span>Color: {item.color}</span><strong>${item.price.toFixed(2)}</strong></div>
-                <button className="delete-item" aria-label={`Remove ${item.name}`} onClick={() => setCart((items) => items.filter((current) => current.id !== item.id || current.size !== item.size))}><Trash2 size={19} /></button>
+                <button className="delete-item" aria-label={`Remove ${item.name}`} disabled={cartBusy || cartSyncing} onClick={() => void onRemove(item)}><Trash2 size={19} /></button>
                 <div className="quantity cart-quantity">
-                  <button aria-label="Decrease quantity" onClick={() => updateQuantity(item.id, item.size, -1)}><Minus size={15} /></button>
+                  <button aria-label="Decrease quantity" disabled={cartBusy || cartSyncing || item.quantity <= 1} onClick={() => void onUpdateQuantity(item, -1)}><Minus size={15} /></button>
                   <span>{item.quantity}</span>
                   <button
                     aria-label="Increase quantity"
-                    disabled={item.stock !== undefined && cart.filter((entry) => entry.id === item.id).reduce((sum, entry) => sum + entry.quantity, 0) >= item.stock}
-                    onClick={() => updateQuantity(item.id, item.size, 1)}
+                    disabled={cartBusy || cartSyncing || (item.stock !== undefined && cart.filter((entry) => entry.id === item.id).reduce((sum, entry) => sum + entry.quantity, 0) >= item.stock)}
+                    onClick={() => void onUpdateQuantity(item, 1)}
                   ><Plus size={15} /></button>
                 </div>
               </div>
@@ -795,8 +815,8 @@ function CartPage({
                   placeholder="Enter your full name"
                 />
                 {checkoutError && <p className="checkout-error" role="alert">{checkoutError}</p>}
-                <button className="button black-button checkout" type="submit" disabled={submitting}>
-                  {submitting ? 'Placing order...' : 'Place Order'} <ArrowRight size={18} />
+                <button className="button black-button checkout" type="submit" disabled={submitting || cartBusy || cartSyncing}>
+                  {submitting ? 'Placing order...' : cartSyncing ? 'Syncing cart...' : 'Place Order'} <ArrowRight size={18} />
                 </button>
               </form>
             </aside>
@@ -814,7 +834,15 @@ export default function App() {
   const [reloadKey, setReloadKey] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [cartReady, setCartReady] = useState(false);
+  const [cartId, setCartId] = useState('');
+  const [cartSyncing, setCartSyncing] = useState(true);
+  const [cartSynced, setCartSynced] = useState(false);
+  const [cartError, setCartError] = useState('');
+  const [pendingCartActions, setPendingCartActions] = useState(0);
   const [storageError, setStorageError] = useState('');
+  const storedCartRef = useRef<CartItem[]>([]);
+  const cartSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const cartBusy = pendingCartActions > 0;
 
   const retryCatalog = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -837,7 +865,10 @@ export default function App() {
 
   useEffect(() => {
     try {
-      setCart(readStoredCart());
+      const savedCart = readStoredCart();
+      storedCartRef.current = savedCart;
+      setCart(savedCart);
+      setCartId(getOrCreateCartId());
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : 'Unable to read the saved cart.');
     } finally {
@@ -846,14 +877,53 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!cartReady) return;
+    if (!cartReady || !cartId) {
+      if (cartReady) setCartSyncing(false);
+      return;
+    }
+    if (cartSyncPromiseRef.current) return;
+
+    const syncCart = async () => {
+      setCartSyncing(true);
+      setCartError('');
+      try {
+        let serverCart = await getCart(cartId);
+        if (serverCart.length === 0 && storedCartRef.current.length > 0) {
+          for (const item of storedCartRef.current) {
+            await addCartItemRequest(cartId, item.id, item.quantity, item.size);
+          }
+          serverCart = await getCart(cartId);
+        }
+        setCart(serverCart.map((item) => ({
+          ...item.product,
+          cartItemId: item.cartItemId,
+          quantity: item.quantity,
+          size: item.size,
+        })));
+        setCartSynced(true);
+      } catch (error) {
+        setCartError(error instanceof Error ? error.message : 'Unable to sync your cart.');
+      } finally {
+        setCartSyncing(false);
+      }
+    };
+
+    const syncRequest = syncCart();
+    cartSyncPromiseRef.current = syncRequest;
+    void syncRequest.finally(() => {
+      if (cartSyncPromiseRef.current === syncRequest) cartSyncPromiseRef.current = null;
+    });
+  }, [cartId, cartReady]);
+
+  useEffect(() => {
+    if (!cartReady || !cartSynced) return;
     try {
       localStorage.setItem('shop-cart', JSON.stringify(cart));
       setStorageError('');
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : 'Unable to save the cart in this browser.');
     }
-  }, [cart, cartReady]);
+  }, [cart, cartReady, cartSynced]);
 
   useEffect(() => {
     if (!cartReady || loading || catalogError || products.length === 0) return;
@@ -866,19 +936,91 @@ export default function App() {
     }));
   }, [products, cartReady, loading, catalogError]);
 
-  const addToCart = (product: Product, size?: string, quantity = 1) => {
+  const addToCart = async (product: Product, size?: string, quantity = 1) => {
     const selectedSize = size || product.sizes[1] || product.sizes[0] || 'One size';
-    if (product.stock !== undefined && product.stock < 1) return;
-    setCart((current) => {
-      const match = current.find((item) => item.id === product.id && item.size === selectedSize);
-      const nextQuantity = current
-        .filter((item) => item.id === product.id)
-        .reduce((sum, item) => sum + item.quantity, quantity);
-      if (product.stock !== undefined && nextQuantity > product.stock) return current;
-      return match
-        ? current.map((item) => item === match ? { ...item, quantity: item.quantity + quantity } : item)
-        : [...current, { ...product, quantity, size: selectedSize }];
-    });
+    if (product.stock !== undefined && product.stock < 1) {
+      setCartError(`${product.name} is out of stock.`);
+      return;
+    }
+    if (!cartId || cartSyncing) {
+      setCartError('Your cart is still syncing. Please try again in a moment.');
+      return;
+    }
+
+    setCartError('');
+    setPendingCartActions((count) => count + 1);
+    try {
+      const savedItem = await addCartItemRequest(cartId, product.id, quantity, selectedSize);
+      setCart((items) => [
+        ...items.filter((item) => item.id !== savedItem.product.id || item.size !== savedItem.size),
+        {
+          ...savedItem.product,
+          cartItemId: savedItem.cartItemId,
+          quantity: savedItem.quantity,
+          size: savedItem.size,
+        },
+      ]);
+      setCartSynced(true);
+    } catch (error) {
+      setCartError(error instanceof Error ? error.message : 'Unable to add this item to your cart.');
+    } finally {
+      setPendingCartActions((count) => Math.max(0, count - 1));
+    }
+  };
+
+  const removeFromCart = async (item: CartItem) => {
+    if (!cartId || !item.cartItemId) {
+      setCartError('This cart item is not synced yet. Please try again.');
+      return;
+    }
+
+    setCartError('');
+    setPendingCartActions((count) => count + 1);
+    try {
+      await removeCartItemRequest(cartId, item.cartItemId);
+      setCart((items) => items.filter((current) => current.cartItemId !== item.cartItemId));
+      setCartSynced(true);
+    } catch (error) {
+      setCartError(error instanceof Error ? error.message : 'Unable to remove this item from your cart.');
+    } finally {
+      setPendingCartActions((count) => Math.max(0, count - 1));
+    }
+  };
+
+  const updateCartQuantity = async (item: CartItem, amount: number) => {
+    if (!cartId || !item.cartItemId) {
+      setCartError('This cart item is not synced yet. Please try again.');
+      return;
+    }
+
+    const quantity = Math.max(1, item.quantity + amount);
+    if (quantity === item.quantity) return;
+    if (
+      amount > 0 &&
+      item.stock !== undefined &&
+      cart.filter((entry) => entry.id === item.id).reduce((sum, entry) => sum + entry.quantity, 0) >= item.stock
+    ) {
+      return;
+    }
+
+    setCartError('');
+    setPendingCartActions((count) => count + 1);
+    try {
+      const savedItem = await updateCartItemRequest(cartId, item.cartItemId, quantity);
+      setCart((items) => items.map((current) => current.cartItemId === savedItem.cartItemId
+        ? {
+          ...savedItem.product,
+          cartItemId: savedItem.cartItemId,
+          quantity: savedItem.quantity,
+          size: savedItem.size,
+        }
+        : current));
+      setCartSynced(true);
+    } catch (error) {
+      setCartError(error instanceof Error ? error.message : 'Unable to update this cart item.');
+    } finally {
+      setPendingCartActions((count) => Math.max(0, count - 1));
+    }
   };
 
   const checkout = async (customerName: string, items: CartItem[]) => {
@@ -890,20 +1032,48 @@ export default function App() {
         size,
       }))
     );
+    try {
+      await clearCartRequest(cartId);
+    } catch (error) {
+      setCartError(
+        error instanceof Error
+          ? `Order placed, but the saved cart could not be cleared: ${error.message}`
+          : 'Order placed, but the saved cart could not be cleared.'
+      );
+    }
     setCart([]);
+    setCartSynced(true);
     return result.orderId;
   };
 
   const catalogProps = { products, loading, error: catalogError, onRetry: retryCatalog };
   return (
     <BrowserRouter>
-      <Layout cart={cart} storageError={storageError}>
+      <Layout
+        cart={cart}
+        storageError={storageError}
+        cartError={cartError}
+        cartSyncing={cartSyncing}
+        cartBusy={cartBusy}
+      >
         <Routes>
           <Route path="/" element={<Home {...catalogProps} onAdd={addToCart} />} />
           <Route path="/shop" element={<Shop {...catalogProps} onAdd={addToCart} />} />
           <Route path="/category" element={<Shop {...catalogProps} onAdd={addToCart} />} />
           <Route path="/product/:id" element={<ProductPage onAdd={addToCart} />} />
-          <Route path="/cart" element={<CartPage cart={cart} setCart={setCart} onCheckout={checkout} />} />
+          <Route
+            path="/cart"
+            element={(
+              <CartPage
+                cart={cart}
+                onCheckout={checkout}
+                onRemove={removeFromCart}
+                onUpdateQuantity={updateCartQuantity}
+                cartSyncing={cartSyncing}
+                cartBusy={cartBusy}
+              />
+            )}
+          />
           <Route path="*" element={<main className="shell state-message"><p>Page not found.</p><Link to="/" className="outline-button">Go home</Link></main>} />
         </Routes>
       </Layout>
