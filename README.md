@@ -9,7 +9,9 @@ installs with `npm ci` and rewrites client-side routes such as `/shop` and
 `/product/:id` to the app entry point. API requests use the full backend URL,
 and static files are served from the build output.
 
-The production build defaults to the deployed backend below. To use a different
+The production build defaults to the deployed backend below. Do not use the
+generic `https://vercel.app` host as the API URL; it is not the shop backend.
+That exact generic host is redirected to the default backend. To use a different
 backend, set this optional override in the frontend Vercel project's Environment
 Variables:
 

@@ -12,7 +12,8 @@ const cleanedApiBaseUrl = (markdownUrl ?? configuredApiBaseUrl)
   .split('(').join('')
   .split(')').join('')
   .trim();
-const backendBaseUrl = cleanedApiBaseUrl
+const isGenericVercelHost = /^https?:\/\/(?:www\.)?vercel\.app(?:\/api)?\/?$/i.test(cleanedApiBaseUrl);
+const backendBaseUrl = (isGenericVercelHost ? 'https://shop-co-backend-g1hg.vercel.app' : cleanedApiBaseUrl)
   .replace(/\/+$/, '')
   .replace(/\/api$/i, '');
 const API_BASE_URL = `${backendBaseUrl}/api`;
