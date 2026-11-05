@@ -1,11 +1,10 @@
 import { getStorefrontImage, type Product } from '@/data';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_URL?.trim();
-if (!configuredApiBaseUrl) {
-  const message = 'VITE_API_URL is missing. Set it to the deployed shop backend URL.';
-  if (import.meta.env.PROD) console.error(message);
-  throw new Error(message);
-}
+const configuredApiBaseUrl =
+  import.meta.env.VITE_API_URL?.trim() ||
+  (import.meta.env.DEV
+    ? 'http://localhost:5000'
+    : 'https://shop-co-backend-g1hg.vercel.app');
 const markdownUrl = configuredApiBaseUrl.match(/https?:\/\/[^\s)]+/i)?.[0];
 const cleanedApiBaseUrl = (markdownUrl ?? configuredApiBaseUrl)
   .split('[').join('')

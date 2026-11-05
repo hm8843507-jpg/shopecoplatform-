@@ -942,7 +942,15 @@ export default function App() {
       setCartError(`${product.name} is out of stock.`);
       return;
     }
-    if (!cartId || cartSyncing) {
+    if (cartSyncing) {
+      const currentSync = cartSyncPromiseRef.current;
+      if (!currentSync) {
+        setCartError('Your cart is still syncing. Please try again in a moment.');
+        return;
+      }
+      await currentSync;
+    }
+    if (!cartId) {
       setCartError('Your cart is still syncing. Please try again in a moment.');
       return;
     }

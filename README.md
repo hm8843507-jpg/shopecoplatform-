@@ -9,7 +9,9 @@ installs with `npm ci` and rewrites client-side routes such as `/shop` and
 `/product/:id` to the app entry point. API requests use the full backend URL,
 and static files are served from the build output.
 
-In the frontend Vercel project's Environment Variables, set:
+The production build defaults to the deployed backend below. To use a different
+backend, set this optional override in the frontend Vercel project's Environment
+Variables:
 
 | Name | Value | Environments |
 | --- | --- | --- |
@@ -17,8 +19,9 @@ In the frontend Vercel project's Environment Variables, set:
 
 Use a plain URL (not Markdown link syntax); the frontend accepts it with or
 without a trailing `/api`. Vite embeds this value at build time, so redeploy
-after changing it. For local development, `.env.development` points to
-`http://localhost:5000`.
+after changing it. For local development, `.env.development` points to the
+deployed backend; change it to `http://localhost:5000` when running the backend
+locally.
 
 ## Backend and database
 
