@@ -36,6 +36,7 @@ import {
   createCheckoutOrder,
   getCart,
   getMyOrders,
+  mergeGuestCart,
   getProductById,
   getProducts,
   type CustomerOrder,
@@ -70,6 +71,51 @@ function getOrCreateCartId(userId: string): string {
   localStorage.setItem(storageKey, cartId);
   localStorage.removeItem(cartIdStorageKey);
   return cartId;
+}
+
+function isStoredGuestCartItem(value: unknown): value is CartItem {
+  if (typeof value !== 'object' || value === null) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.id === 'string' &&
+    typeof item.name === 'string' &&
+    Number.isFinite(Number(item.price)) &&
+    Number.isInteger(item.quantity) &&
+    Number(item.quantity) > 0 &&
+    typeof item.size === 'string' &&
+    Array.isArray(item.sizes);
+}
+
+function readGuestCart(): { items: CartItem[]; error: string } {
+  try {
+    const stored = localStorage.getItem('shop-guest-cart');
+    if (!stored) return { items: [], error: '' };
+    const parsed: unknown = JSON.parse(stored);
+    if (!Array.isArray(parsed)) throw new Error('The saved guest cart is invalid.');
+
+    const items: CartItem[] = [];
+    for (const item of parsed as unknown[]) {
+      if (!isStoredGuestCartItem(item)) {
+        throw new Error('The saved guest cart contains an invalid item.');
+      }
+      items.push({ ...item, cartItemId: undefined });
+    }
+    return { items, error: '' };
+  } catch (error) {
+    return {
+      items: [],
+      error: error instanceof Error ? error.message : 'Unable to load your saved guest cart.',
+    };
+  }
+}
+
+function storeGuestCart(items: CartItem[]) {
+  const guestItems = items.map((item) => {
+    const storedItem = { ...item };
+    delete storedItem.cartItemId;
+    return storedItem;
+  });
+  if (guestItems.length) localStorage.setItem('shop-guest-cart', JSON.stringify(guestItems));
+  else localStorage.removeItem('shop-guest-cart');
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -743,6 +789,8 @@ function CartPage({
   cartSyncing: boolean;
   cartBusy: boolean;
 }) {
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [customerName, setCustomerName] = useState('');
   const [shippingAddress, setShippingAddress] = useState<ShippingAddress>({
     address_line1: '',
@@ -757,8 +805,15 @@ function CartPage({
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const discount = subtotal * 0.2;
   const total = subtotal - discount + (subtotal ? 15 : 0);
+  useEffect(() => {
+    if (user?.name) setCustomerName(user.name);
+  }, [user?.name]);
   const handleCheckout = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!user) {
+      navigate('/login?redirect=%2Fcart');
+      return;
+    }
     setCheckoutError('');
     setSubmitting(true);
     try {
@@ -806,6 +861,13 @@ function CartPage({
               <div className="total"><span>Total</span><strong>${total.toFixed(2)}</strong></div>
               <div className="promo-input"><input placeholder="Add promo code" /><button>Apply</button></div>
               <form className="checkout-form" onSubmit={handleCheckout}>
+                {!user ? (
+                  <div className="guest-checkout">
+                    <p>Sign in when you are ready to checkout. Your guest cart will be saved on this device.</p>
+                    <Link className="button black-button checkout" to="/login?redirect=%2Fcart">Sign in to checkout <ArrowRight size={18} /></Link>
+                  </div>
+                ) : (
+                  <>
                 <label htmlFor="checkout-customer-name">Your name</label>
                 <input
                   id="checkout-customer-name"
@@ -870,6 +932,8 @@ function CartPage({
                 <button className="button black-button checkout" type="submit" disabled={submitting || cartBusy || cartSyncing}>
                   {submitting ? 'Placing order...' : cartSyncing ? 'Syncing cart...' : 'Place Order'} <ArrowRight size={18} />
                 </button>
+                  </>
+                )}
               </form>
             </aside>
           </div>
@@ -915,7 +979,14 @@ function AuthPage({ mode }: { mode: 'login' | 'register' }) {
       else await login(email.trim(), password);
       navigate(destination, { replace: true });
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Unable to authenticate.');
+      const status = error instanceof Error && 'status' in error ? Number(error.status) : undefined;
+      if (mode === 'login' && status === 400) {
+        setFormError('Email or password is incorrect. Please check your details and try again.');
+      } else if (mode === 'register' && status === 409) {
+        setFormError('Account already exists, please log in.');
+      } else {
+        setFormError(error instanceof Error ? error.message : 'Unable to authenticate. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -1000,22 +1071,21 @@ function OrderHistory() {
 
 function Storefront() {
   const { user, loading: authLoading } = useAuth();
-  const location = useLocation();
-  const navigate = useNavigate();
   const userId = user?.id;
+  const [initialGuestCart] = useState(readGuestCart);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [catalogError, setCatalogError] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [cartReady, setCartReady] = useState(false);
+  const [cart, setCart] = useState<CartItem[]>(initialGuestCart.items);
+  const [cartReady, setCartReady] = useState(true);
   const [cartId, setCartId] = useState('');
   const [cartSyncing, setCartSyncing] = useState(true);
   const [cartSynced, setCartSynced] = useState(false);
   const [cartRetryKey, setCartRetryKey] = useState(0);
   const [cartError, setCartError] = useState('');
   const [pendingCartActions, setPendingCartActions] = useState(0);
-  const [storageError, setStorageError] = useState('');
+  const [storageError, setStorageError] = useState(initialGuestCart.error);
   const cartBusy = pendingCartActions > 0;
 
   const retryCatalog = useCallback(() => setReloadKey((key) => key + 1), []);
@@ -1040,19 +1110,17 @@ function Storefront() {
   useEffect(() => {
     if (authLoading) return;
     if (!userId) {
-      localStorage.removeItem('shop-cart');
-      setCart([]);
       setCartId('');
       setCartReady(true);
       setCartSynced(false);
       setCartSyncing(false);
       setCartError('');
+      setCart((items) => items.map((item) => ({ ...item, cartItemId: undefined })));
       return;
     }
 
     try {
       localStorage.removeItem('shop-cart');
-      setCart([]);
       setCartReady(false);
       setCartSyncing(true);
       setCartSynced(false);
@@ -1063,6 +1131,16 @@ function Storefront() {
       setCartReady(true);
     }
   }, [authLoading, userId]);
+
+  useEffect(() => {
+    if (authLoading || userId) return;
+    try {
+      storeGuestCart(cart);
+      setStorageError('');
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to save your guest cart.');
+    }
+  }, [authLoading, userId, cart]);
 
   useEffect(() => {
     if (authLoading || !userId || !cartReady || !cartId) {
@@ -1076,7 +1154,14 @@ function Storefront() {
       setCartSynced(false);
       setCartError('');
       try {
-        const serverCart = await getCart(cartId);
+        const guestCart = readGuestCart();
+        if (guestCart.error) throw new Error(guestCart.error);
+        const serverCart = guestCart.items.length
+          ? await mergeGuestCart(
+            cartId,
+            guestCart.items.map(({ id, quantity, size }) => ({ id, quantity, size }))
+          )
+          : await getCart(cartId);
         if (!active) return;
         setCart(serverCart.map((item) => ({
           ...item.product,
@@ -1087,7 +1172,8 @@ function Storefront() {
         setCartSynced(true);
       } catch (error) {
         if (!active) return;
-        setCart([]);
+        const guestCart = readGuestCart();
+        setCart(guestCart.items);
         setCartError(error instanceof Error ? error.message : 'Unable to sync your cart.');
       } finally {
         if (active) setCartSyncing(false);
@@ -1115,14 +1201,27 @@ function Storefront() {
   }, [products, cartReady, loading, catalogError]);
 
   const addToCart = async (product: Product, size?: string, quantity = 1) => {
-    if (!user) {
-      const redirect = encodeURIComponent(`${location.pathname}${location.search}`);
-      navigate(`/login?redirect=${redirect}`);
-      return;
-    }
     const selectedSize = size || product.sizes[1] || product.sizes[0] || 'One size';
     if (product.stock !== undefined && product.stock < 1) {
       setCartError(`${product.name} is out of stock.`);
+      return;
+    }
+    if (!user) {
+      const totalForProduct = cart
+        .filter((item) => item.id === product.id)
+        .reduce((sum, item) => sum + item.quantity, 0);
+      if (product.stock !== undefined && totalForProduct + quantity > product.stock) {
+        setCartError(`${product.name} does not have enough stock.`);
+        return;
+      }
+      setCart((items) => {
+        const existing = items.find((item) => item.id === product.id && item.size === selectedSize);
+        return existing
+          ? items.map((item) => item === existing
+            ? { ...item, quantity: item.quantity + quantity }
+            : item)
+          : [...items, { ...product, quantity, size: selectedSize }];
+      });
       return;
     }
     if (cartSyncing || !cartSynced || !cartId) {
@@ -1152,6 +1251,11 @@ function Storefront() {
   };
 
   const removeFromCart = async (item: CartItem) => {
+    if (!user) {
+      setCart((items) => items.filter((current) => current.id !== item.id || current.size !== item.size));
+      setCartError('');
+      return;
+    }
     if (!cartId || !item.cartItemId) {
       setCartError('This cart item is not synced yet. Please try again.');
       return;
@@ -1171,6 +1275,14 @@ function Storefront() {
   };
 
   const updateCartQuantity = async (item: CartItem, amount: number) => {
+    if (!user) {
+      setCart((items) => items.map((current) =>
+        current.id === item.id && current.size === item.size
+          ? { ...current, quantity: Math.max(1, current.quantity + amount) }
+          : current
+      ));
+      return;
+    }
     if (!cartId || !item.cartItemId) {
       setCartError('This cart item is not synced yet. Please try again.');
       return;
@@ -1255,19 +1367,17 @@ function Storefront() {
           <Route path="/category" element={<Shop {...catalogProps} onAdd={addToCart} />} />
           <Route path="/product/:id" element={<ProductPage onAdd={addToCart} />} />
           <Route
-            path="/cart"
-            element={(
-              <RequireAuth>
-                <CartPage
-                  cart={cart}
-                  onCheckout={checkout}
-                  onRemove={removeFromCart}
-                  onUpdateQuantity={updateCartQuantity}
-                  cartSyncing={cartSyncing}
-                  cartBusy={cartBusy}
-                />
-              </RequireAuth>
-            )}
+          path="/cart"
+          element={(
+            <CartPage
+              cart={cart}
+              onCheckout={checkout}
+              onRemove={removeFromCart}
+              onUpdateQuantity={updateCartQuantity}
+              cartSyncing={cartSyncing}
+              cartBusy={cartBusy}
+            />
+          )}
           />
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />

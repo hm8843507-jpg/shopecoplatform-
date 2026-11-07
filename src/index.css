@@ -185,6 +185,7 @@ input[type='range'] { accent-color: #000; width: 100%; }
 .checkout-form label { font-size: 13px; font-weight: 600; }
 .checkout-form input { width: 100%; padding: 12px 14px; border: 1px solid #ddd; border-radius: 20px; }
 .checkout-form .checkout { margin-top: 5px; }
+.guest-checkout p { color: #666; font-size: 13px; line-height: 1.5; }
 .checkout-error { margin: 0; color: #a32121; font-size: 13px; }
 .checkout-success { padding: 14px 18px; border-radius: 12px; background: #eaf7ed; color: #216b35; }
 .empty-cart { border: 1px dashed #ddd; border-radius: 20px; padding: 80px 20px; text-align: center; }

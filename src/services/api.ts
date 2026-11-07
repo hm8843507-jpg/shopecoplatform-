@@ -152,14 +152,17 @@ async function request(
   let response: Response;
   try {
     const token = localStorage.getItem('shop-auth-token');
+    const isPublicAuthRequest = path === '/auth/login' || path === '/auth/register';
+    const method = options.method || 'GET';
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
         Accept: 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(!isPublicAuthRequest && token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(['POST', 'PUT', 'PATCH'].includes(method) ? { 'Content-Type': 'application/json' } : {}),
       },
+      method,
+      body: options.body,
       signal,
-      ...options,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
@@ -400,6 +403,80 @@ export async function removeCartItem(cartId: string, itemId: string): Promise<vo
 export async function clearCart(cartId: string): Promise<void> {
   const query = new URLSearchParams({ cart_id: cartId });
   await request(`/cart?${query.toString()}`, undefined, { method: 'DELETE' });
+}
+
+type GuestCartEntry = {
+  id: string;
+  quantity: number;
+  size: string;
+};
+
+const guestCartMerges = new Map<string, Promise<CartLine[]>>();
+
+function subtractMergedGuestQuantity(productId: string, size: string, quantity: number) {
+  const stored = localStorage.getItem('shop-guest-cart');
+  if (!stored) return;
+  const items: unknown = JSON.parse(stored);
+  if (!Array.isArray(items)) throw new Error('The saved guest cart is invalid.');
+
+  const remaining = items.flatMap((item) => {
+    if (
+      !isRecord(item) ||
+      item.id !== productId ||
+      item.size !== size ||
+      !Number.isInteger(item.quantity)
+    ) {
+      return [item];
+    }
+    const remainingQuantity = Number(item.quantity) - quantity;
+    return remainingQuantity > 0 ? [{ ...item, quantity: remainingQuantity }] : [];
+  });
+  if (remaining.length) localStorage.setItem('shop-guest-cart', JSON.stringify(remaining));
+  else localStorage.removeItem('shop-guest-cart');
+}
+
+export function mergeGuestCart(cartId: string, guestItems: GuestCartEntry[]): Promise<CartLine[]> {
+  const existingMerge = guestCartMerges.get(cartId);
+  if (existingMerge) return existingMerge;
+
+  const merge = (async () => {
+    let savedItems = await getCart(cartId);
+    for (const guestItem of guestItems) {
+      const currentGuestItems: unknown = JSON.parse(localStorage.getItem('shop-guest-cart') || '[]');
+      if (!Array.isArray(currentGuestItems)) throw new Error('The saved guest cart is invalid.');
+      const currentGuestItem = currentGuestItems.find((item) =>
+        isRecord(item) && item.id === guestItem.id && item.size === guestItem.size
+      );
+      if (!isRecord(currentGuestItem) || !Number.isInteger(currentGuestItem.quantity)) continue;
+
+      const quantity = Number(currentGuestItem.quantity);
+      const savedItem = savedItems.find((item) =>
+        item.product.id === guestItem.id && item.size === guestItem.size
+      );
+      if (savedItem) {
+        const updatedItem = await updateCartItem(
+          cartId,
+          savedItem.cartItemId,
+          savedItem.quantity + quantity
+        );
+        savedItems = savedItems.map((item) =>
+          item.cartItemId === updatedItem.cartItemId ? updatedItem : item
+        );
+      } else {
+        const addedItem = await addCartItem(cartId, guestItem.id, quantity, guestItem.size);
+        savedItems = [...savedItems, addedItem];
+      }
+      subtractMergedGuestQuantity(guestItem.id, guestItem.size, quantity);
+    }
+    return savedItems;
+  })();
+
+  guestCartMerges.set(cartId, merge);
+  void merge.then(
+    () => guestCartMerges.delete(cartId),
+    () => guestCartMerges.delete(cartId)
+  );
+  return merge;
 }
 
 export type CheckoutItem = {
