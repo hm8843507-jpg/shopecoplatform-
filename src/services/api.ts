@@ -151,9 +151,11 @@ async function request(
 ): Promise<unknown> {
   let response: Response;
   try {
+    const token = localStorage.getItem('shop-auth-token');
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
         Accept: 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       },
       signal,
@@ -166,12 +168,116 @@ async function request(
 
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      !path.startsWith('/auth/login') &&
+      !path.startsWith('/auth/register')
+    ) {
+      localStorage.removeItem('shop-auth-token');
+      window.dispatchEvent(new Event('shop:auth-expired'));
+    }
     const message = isRecord(payload) && typeof payload.message === 'string'
       ? payload.message
       : `The shop server returned ${response.status}.`;
     throw new ApiError(message, response.status);
   }
   return payload;
+}
+
+export type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+};
+
+function toAuthUser(payload: unknown): AuthUser {
+  if (
+    !isRecord(payload) ||
+    (typeof payload.id !== 'string' && typeof payload._id !== 'string') ||
+    typeof payload.name !== 'string' ||
+    typeof payload.email !== 'string'
+  ) {
+    throw new Error('The authentication API returned an invalid user.');
+  }
+  return {
+    id: String(payload.id ?? payload._id),
+    name: payload.name,
+    email: payload.email,
+    role: typeof payload.role === 'string' ? payload.role : 'User',
+  };
+}
+
+function toAuthSession(payload: unknown): { token: string; user: AuthUser } {
+  if (!isRecord(payload) || typeof payload.token !== 'string' || !isRecord(payload.user)) {
+    throw new Error('The authentication API returned an invalid session.');
+  }
+  return { token: payload.token, user: toAuthUser(payload.user) };
+}
+
+export async function login(email: string, password: string) {
+  return toAuthSession(await request('/auth/login', undefined, {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  }));
+}
+
+export async function register(name: string, email: string, password: string) {
+  return toAuthSession(await request('/auth/register', undefined, {
+    method: 'POST',
+    body: JSON.stringify({ name, email, password }),
+  }));
+}
+
+export async function getCurrentUser() {
+  const payload = await request('/auth/me');
+  if (!isRecord(payload) || !isRecord(payload.user)) {
+    throw new Error('The authentication API returned an invalid profile.');
+  }
+  return toAuthUser(payload.user);
+}
+
+export type CustomerOrder = {
+  id: string;
+  order_id: string;
+  created_at?: string;
+  status: string;
+  total_amount: number;
+  items: Array<{ name: string; quantity: number; size: string }>;
+};
+
+export async function getMyOrders(signal?: AbortSignal): Promise<CustomerOrder[]> {
+  const payload = await request('/orders/mine', signal);
+  const orderList = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload.orders)
+      ? payload.orders
+      : null;
+  if (!orderList) throw new Error('The orders API returned an invalid order list.');
+
+  return orderList.map((order): CustomerOrder => {
+    if (
+      !isRecord(order) ||
+      typeof order.order_id !== 'string' ||
+      typeof order.status !== 'string' ||
+      !Number.isFinite(Number(order.total_amount)) ||
+      !Array.isArray(order.items)
+    ) {
+      throw new Error('The orders API returned an invalid order.');
+    }
+    return {
+      id: String(order.id ?? order._id ?? order.order_id),
+      order_id: order.order_id,
+      ...(typeof order.created_at === 'string' ? { created_at: order.created_at } : {}),
+      status: order.status,
+      total_amount: Number(order.total_amount),
+      items: order.items.map((item) => ({
+        name: isRecord(item) && typeof item.name === 'string' ? item.name : 'Product',
+        quantity: isRecord(item) && Number.isInteger(item.quantity) ? Number(item.quantity) : 1,
+        size: isRecord(item) && typeof item.size === 'string' ? item.size : '',
+      })),
+    };
+  });
 }
 
 function getProductList(payload: unknown): unknown[] {

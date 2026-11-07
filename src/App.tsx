@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from
 import {
   BrowserRouter,
   Link,
+  Navigate,
   NavLink,
   Route,
   Routes,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -33,12 +35,15 @@ import {
   clearCart as clearCartRequest,
   createCheckoutOrder,
   getCart,
+  getMyOrders,
   getProductById,
   getProducts,
+  type CustomerOrder,
   removeCartItem as removeCartItemRequest,
   type ShippingAddress,
   updateCartItem as updateCartItemRequest,
 } from '@/services/api';
+import { useAuth } from '@/context/useAuth';
 import '@/index.css';
 
 type CartItem = Product & { cartItemId?: string; quantity: number; size: string };
@@ -51,14 +56,19 @@ type CatalogProps = {
   onRetry: () => void;
 };
 
-function getOrCreateCartId(): string {
-  const storedCartId = localStorage.getItem(cartIdStorageKey);
+function getOrCreateCartId(userId: string): string {
+  const storageKey = `${cartIdStorageKey}:${userId}`;
+  const storedCartId = localStorage.getItem(storageKey);
   if (storedCartId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storedCartId)) {
     return storedCartId.toLowerCase();
   }
 
-  const cartId = crypto.randomUUID();
-  localStorage.setItem(cartIdStorageKey, cartId);
+  const legacyCartId = localStorage.getItem(cartIdStorageKey);
+  const cartId = legacyCartId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(legacyCartId)
+    ? legacyCartId.toLowerCase()
+    : crypto.randomUUID();
+  localStorage.setItem(storageKey, cartId);
+  localStorage.removeItem(cartIdStorageKey);
   return cartId;
 }
 
@@ -80,6 +90,7 @@ function Stars({ rating }: { rating: number }) {
 function Header({ cartCount, onMenu }: { cartCount: number; onMenu: () => void }) {
   const [search, setSearch] = useState('');
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
   return (
     <>
@@ -118,9 +129,10 @@ function Header({ cartCount, onMenu }: { cartCount: number; onMenu: () => void }
             <ShoppingCart size={23} />
             {cartCount > 0 && <b>{cartCount}</b>}
           </Link>
-          <button className="action-icon desktop-only" aria-label="Account">
+          <Link to={user ? '/orders' : '/login'} className="action-icon desktop-only" aria-label={user ? 'Order history' : 'Sign in'}>
             <CircleUserRound size={23} />
-          </button>
+          </Link>
+          {user && <button className="desktop-only account-logout" onClick={logout}>Sign out</button>}
         </div>
       </header>
     </>
@@ -167,6 +179,7 @@ function Layout({
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { user, error: authError, logout } = useAuth();
   return (
     <>
       <Header
@@ -180,9 +193,12 @@ function Layout({
           <Link onClick={() => setMenuOpen(false)} to="/shop?onSale=true">On Sale</Link>
           <Link onClick={() => setMenuOpen(false)} to="/shop?sort=newest">New Arrivals</Link>
           <Link onClick={() => setMenuOpen(false)} to="/shop?view=brands">Brands</Link>
+          <Link onClick={() => setMenuOpen(false)} to={user ? '/orders' : '/login'}>{user ? 'My Orders' : 'Sign In'}</Link>
+          {user && <button onClick={() => { logout(); setMenuOpen(false); }}>Sign Out</button>}
         </div>
       )}
       {storageError && <p className="state-message error-message shell" role="alert">{storageError}</p>}
+      {authError && <p className="state-message error-message shell" role="alert">{authError}</p>}
       {cartError && (
         <p className="state-message error-message shell" role="alert">
           {cartError}
@@ -863,7 +879,130 @@ function CartPage({
   );
 }
 
-export default function App() {
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <p className="state-message" role="status">Restoring your account...</p>;
+  if (!user) {
+    const redirect = encodeURIComponent(`${location.pathname}${location.search}`);
+    return <Navigate to={`/login?redirect=${redirect}`} replace />;
+  }
+  return children;
+}
+
+function AuthPage({ mode }: { mode: 'login' | 'register' }) {
+  const { user, loading, login, register } = useAuth();
+  const [searchParams] = useSearchParams();
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [formError, setFormError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const navigate = useNavigate();
+  const redirect = searchParams.get('redirect');
+  const destination = redirect?.startsWith('/') && !redirect.startsWith('//') ? redirect : '/';
+
+  useEffect(() => {
+    if (!loading && user) navigate(destination, { replace: true });
+  }, [destination, loading, navigate, user]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError('');
+    setSubmitting(true);
+    try {
+      if (mode === 'register') await register(name.trim(), email.trim(), password);
+      else await login(email.trim(), password);
+      navigate(destination, { replace: true });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Unable to authenticate.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) return <p className="state-message" role="status">Restoring your account...</p>;
+  return (
+    <main className="shell auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <h1>{mode === 'login' ? 'Welcome back' : 'Create your account'}</h1>
+        <p>{mode === 'login' ? 'Sign in to sync your cart and manage your orders.' : 'Register to save your cart and track your orders.'}</p>
+        {mode === 'register' && (
+          <label>
+            Full name
+            <input autoComplete="name" required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+        )}
+        <label>
+          Email
+          <input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
+        </label>
+        <label>
+          Password
+          <input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={(event) => setPassword(event.target.value)} />
+        </label>
+        {formError && <p className="checkout-error" role="alert">{formError}</p>}
+        <button className="button black-button" type="submit" disabled={submitting}>
+          {submitting ? 'Please wait...' : mode === 'login' ? 'Sign In' : 'Create Account'}
+        </button>
+        <p className="auth-switch">
+          {mode === 'login' ? 'New to Shop.co?' : 'Already have an account?'}{' '}
+          <Link to={`/${mode === 'login' ? 'register' : 'login'}${redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''}`}>
+            {mode === 'login' ? 'Create an account' : 'Sign in'}
+          </Link>
+        </p>
+      </form>
+    </main>
+  );
+}
+
+function OrderHistory() {
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getMyOrders(controller.signal)
+      .then(setOrders)
+      .catch((requestError: unknown) => {
+        if (!(requestError instanceof DOMException && requestError.name === 'AbortError')) {
+          setError(requestError instanceof Error ? requestError.message : 'Unable to load your orders.');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  return (
+    <main className="shell order-history">
+      <div className="section-heading"><h1>MY ORDERS</h1><Link className="outline-button" to="/shop">Continue shopping</Link></div>
+      {loading && <p className="state-message" role="status">Loading your orders...</p>}
+      {error && <p className="state-message error-message" role="alert">{error}</p>}
+      {!loading && !error && !orders.length && <div className="empty-cart"><h2>No orders yet</h2><p>Your completed purchases will appear here.</p></div>}
+      <div className="order-list">
+        {orders.map((order) => (
+          <article className="order-card" key={order.id}>
+            <div className="order-card-heading">
+              <div><h2>{order.order_id}</h2><span>{order.created_at ? new Date(order.created_at).toLocaleDateString() : ''}</span></div>
+              <span className={`order-status status-${order.status.toLowerCase()}`}>{order.status}</span>
+            </div>
+            <p>{order.items.map((item) => `${item.name} × ${item.quantity}${item.size ? ` (${item.size})` : ''}`).join(', ')}</p>
+            <strong>Total: ${order.total_amount.toFixed(2)}</strong>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+
+function Storefront() {
+  const { user, loading: authLoading } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const userId = user?.id;
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [catalogError, setCatalogError] = useState('');
@@ -899,29 +1038,46 @@ export default function App() {
   }, [reloadKey]);
 
   useEffect(() => {
+    if (authLoading) return;
+    if (!userId) {
+      localStorage.removeItem('shop-cart');
+      setCart([]);
+      setCartId('');
+      setCartReady(true);
+      setCartSynced(false);
+      setCartSyncing(false);
+      setCartError('');
+      return;
+    }
+
     try {
       localStorage.removeItem('shop-cart');
       setCart([]);
-      setCartId(getOrCreateCartId());
+      setCartReady(false);
+      setCartSyncing(true);
+      setCartSynced(false);
+      setCartId(getOrCreateCartId(userId));
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : 'Unable to read the saved cart.');
     } finally {
       setCartReady(true);
     }
-  }, []);
+  }, [authLoading, userId]);
 
   useEffect(() => {
-    if (!cartReady || !cartId) {
-      if (cartReady) setCartSyncing(false);
+    if (authLoading || !userId || !cartReady || !cartId) {
+      if (cartReady && !authLoading) setCartSyncing(false);
       return;
     }
 
+    let active = true;
     const syncCart = async () => {
       setCartSyncing(true);
       setCartSynced(false);
       setCartError('');
       try {
         const serverCart = await getCart(cartId);
+        if (!active) return;
         setCart(serverCart.map((item) => ({
           ...item.product,
           cartItemId: item.cartItemId,
@@ -930,15 +1086,17 @@ export default function App() {
         })));
         setCartSynced(true);
       } catch (error) {
+        if (!active) return;
         setCart([]);
         setCartError(error instanceof Error ? error.message : 'Unable to sync your cart.');
       } finally {
-        setCartSyncing(false);
+        if (active) setCartSyncing(false);
       }
     };
 
     void syncCart();
-  }, [cartId, cartReady, cartRetryKey]);
+    return () => { active = false; };
+  }, [authLoading, userId, cartId, cartReady, cartRetryKey]);
 
   useEffect(() => {
     if (!cartReady || loading || catalogError || products.length === 0) return;
@@ -957,6 +1115,11 @@ export default function App() {
   }, [products, cartReady, loading, catalogError]);
 
   const addToCart = async (product: Product, size?: string, quantity = 1) => {
+    if (!user) {
+      const redirect = encodeURIComponent(`${location.pathname}${location.search}`);
+      navigate(`/login?redirect=${redirect}`);
+      return;
+    }
     const selectedSize = size || product.sizes[1] || product.sizes[0] || 'One size';
     if (product.stock !== undefined && product.stock < 1) {
       setCartError(`${product.name} is out of stock.`);
@@ -1049,6 +1212,7 @@ export default function App() {
     items: CartItem[],
     totalAmount: number
   ) => {
+    if (!user || !cartId) throw new Error('Please sign in before placing your order.');
     const result = await createCheckoutOrder(
       cartId,
       customerName,
@@ -1077,7 +1241,6 @@ export default function App() {
   const catalogProps = { products, loading, error: catalogError, onRetry: retryCatalog };
   const retryCartSync = useCallback(() => setCartRetryKey((key) => key + 1), []);
   return (
-    <BrowserRouter>
       <Layout
         cart={cart}
         storageError={storageError}
@@ -1094,19 +1257,31 @@ export default function App() {
           <Route
             path="/cart"
             element={(
-              <CartPage
-                cart={cart}
-                onCheckout={checkout}
-                onRemove={removeFromCart}
-                onUpdateQuantity={updateCartQuantity}
-                cartSyncing={cartSyncing}
-                cartBusy={cartBusy}
-              />
+              <RequireAuth>
+                <CartPage
+                  cart={cart}
+                  onCheckout={checkout}
+                  onRemove={removeFromCart}
+                  onUpdateQuantity={updateCartQuantity}
+                  cartSyncing={cartSyncing}
+                  cartBusy={cartBusy}
+                />
+              </RequireAuth>
             )}
           />
+          <Route path="/login" element={<AuthPage mode="login" />} />
+          <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/orders" element={<RequireAuth><OrderHistory /></RequireAuth>} />
           <Route path="*" element={<main className="shell state-message"><p>Page not found.</p><Link to="/" className="outline-button">Go home</Link></main>} />
         </Routes>
       </Layout>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Storefront />
     </BrowserRouter>
   );
 }
