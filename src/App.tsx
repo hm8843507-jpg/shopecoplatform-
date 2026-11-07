@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BrowserRouter,
   Link,
@@ -27,16 +27,16 @@ import {
   X,
   Check,
 } from 'lucide-react';
-import { getDiscount, type Product } from '@/data';
+import { getDiscount, getStorefrontImage, type Product } from '@/data';
 import {
   addCartItem as addCartItemRequest,
   clearCart as clearCartRequest,
   createCheckoutOrder,
-  getBackendAssetUrl,
   getCart,
   getProductById,
   getProducts,
   removeCartItem as removeCartItemRequest,
+  type ShippingAddress,
   updateCartItem as updateCartItemRequest,
 } from '@/services/api';
 import '@/index.css';
@@ -60,36 +60,6 @@ function getOrCreateCartId(): string {
   const cartId = crypto.randomUUID();
   localStorage.setItem(cartIdStorageKey, cartId);
   return cartId;
-}
-
-function readStoredCart(): CartItem[] {
-  const raw = localStorage.getItem('shop-cart');
-  if (!raw) return [];
-
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed)) throw new Error('Saved cart data is invalid.');
-
-  return parsed.map((item: unknown) => {
-    if (
-      typeof item !== 'object' ||
-      item === null ||
-      !('id' in item) ||
-      typeof item.id !== 'string' ||
-      !('name' in item) ||
-      typeof item.name !== 'string' ||
-      !('price' in item) ||
-      typeof item.price !== 'number' ||
-      !('quantity' in item) ||
-      typeof item.quantity !== 'number' ||
-      !Number.isInteger(item.quantity) ||
-      item.quantity < 1 ||
-      !('size' in item) ||
-      typeof item.size !== 'string'
-    ) {
-      throw new Error('Saved cart data is invalid. Clear the browser cart and try again.');
-    }
-    return item as CartItem;
-  });
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -185,6 +155,7 @@ function Layout({
   cartError,
   cartSyncing,
   cartBusy,
+  onRetryCartSync,
   children,
 }: {
   cart: CartItem[];
@@ -192,6 +163,7 @@ function Layout({
   cartError: string;
   cartSyncing: boolean;
   cartBusy: boolean;
+  onRetryCartSync: () => void;
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -211,7 +183,12 @@ function Layout({
         </div>
       )}
       {storageError && <p className="state-message error-message shell" role="alert">{storageError}</p>}
-      {cartError && <p className="state-message error-message shell" role="alert">{cartError}</p>}
+      {cartError && (
+        <p className="state-message error-message shell" role="alert">
+          {cartError}
+          <button className="outline-button" onClick={onRetryCartSync} disabled={cartSyncing}>Retry cart sync</button>
+        </p>
+      )}
       {cartSyncing && <p className="state-message shell" role="status">Syncing your cart...</p>}
       {!cartSyncing && cartBusy && <p className="state-message shell" role="status">Updating your cart...</p>}
       {children}
@@ -246,11 +223,8 @@ function SafeImage({ src, alt }: { src: string; alt: string }) {
   );
 }
 
-function ProductImage({ product, src, alt }: { product: Product; src: string; alt: string }) {
-  const safeSource = /placeholder\.(?:com|co)(?:\/|$)/i.test(src)
-    ? imageFallback
-    : getBackendAssetUrl(src) || imageFallback;
-  return <SafeImage key={product.id} src={safeSource} alt={alt} />;
+function ProductImage({ product, alt }: { product: Product; alt: string }) {
+  return <SafeImage key={product.id} src={getStorefrontImage(product.id)} alt={alt} />;
 }
 
 function ProductCard({ product, onAdd }: { product: Product; onAdd: (product: Product) => void }) {
@@ -258,7 +232,7 @@ function ProductCard({ product, onAdd }: { product: Product; onAdd: (product: Pr
     <article className="product-card">
       <div className="product-image">
         <Link to={`/product/${encodeURIComponent(product.id)}`} aria-label={`View ${product.name}`}>
-          <ProductImage product={product} src={product.image} alt={product.name} />
+          <ProductImage product={product} alt={product.name} />
         </Link>
         <button
           onClick={() => onAdd(product)}
@@ -690,8 +664,8 @@ function ProductPage({ onAdd }: { onAdd: (product: Product, size: string, quanti
       <Breadcrumb current={product.name} />
       <div className="shell product-detail">
         <div className="product-gallery">
-          <div className="thumbs">{[product.image].map((src) => <button key={src} className={image === src ? 'selected' : ''} onClick={() => setImage(src)}><ProductImage product={product} src={src} alt="" /></button>)}</div>
-          <div className="main-product-image"><ProductImage product={product} src={image || product.image} alt={product.name} /></div>
+          <div className="thumbs">{[product.image].map((src) => <button key={src} className={image === src ? 'selected' : ''} onClick={() => setImage(src)}><ProductImage product={product} alt="" /></button>)}</div>
+          <div className="main-product-image"><ProductImage product={product} alt={product.name} /></div>
         </div>
         <div className="product-info">
           <h1>{product.name}</h1>
@@ -742,13 +716,25 @@ function CartPage({
   cartBusy,
 }: {
   cart: CartItem[];
-  onCheckout: (customerName: string, items: CartItem[]) => Promise<string>;
+  onCheckout: (
+    customerName: string,
+    shippingAddress: ShippingAddress,
+    items: CartItem[],
+    totalAmount: number
+  ) => Promise<string>;
   onRemove: (item: CartItem) => Promise<void>;
   onUpdateQuantity: (item: CartItem, amount: number) => Promise<void>;
   cartSyncing: boolean;
   cartBusy: boolean;
 }) {
   const [customerName, setCustomerName] = useState('');
+  const [shippingAddress, setShippingAddress] = useState<ShippingAddress>({
+    address_line1: '',
+    city: '',
+    state: '',
+    postal_code: '',
+    country: '',
+  });
   const [checkoutError, setCheckoutError] = useState('');
   const [orderConfirmation, setOrderConfirmation] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -760,7 +746,7 @@ function CartPage({
     setCheckoutError('');
     setSubmitting(true);
     try {
-      const orderId = await onCheckout(customerName.trim(), cart);
+      const orderId = await onCheckout(customerName.trim(), shippingAddress, cart, total);
       setOrderConfirmation(`Order ${orderId} was placed successfully.`);
       setCustomerName('');
     } catch (error) {
@@ -781,7 +767,7 @@ function CartPage({
           <div className="cart-layout">
             <div className="cart-items">{cart.map((item) => (
               <div className="cart-item" key={`${item.id}-${item.size}`}>
-                <ProductImage product={item} src={item.image} alt={item.name} />
+                <ProductImage product={item} alt={item.name} />
                 <div className="cart-item-info"><Link to={`/product/${encodeURIComponent(item.id)}`}><h3>{item.name}</h3></Link><span>Size: {item.size}</span><span>Color: {item.color}</span><strong>${item.price.toFixed(2)}</strong></div>
                 <button className="delete-item" aria-label={`Remove ${item.name}`} disabled={cartBusy || cartSyncing} onClick={() => void onRemove(item)}><Trash2 size={19} /></button>
                 <div className="quantity cart-quantity">
@@ -814,6 +800,56 @@ function CartPage({
                   onChange={(event) => setCustomerName(event.target.value)}
                   placeholder="Enter your full name"
                 />
+                <label htmlFor="checkout-address">Street address</label>
+                <input
+                  id="checkout-address"
+                  name="address_line1"
+                  autoComplete="address-line1"
+                  required
+                  value={shippingAddress.address_line1}
+                  onChange={(event) => setShippingAddress((address) => ({ ...address, address_line1: event.target.value }))}
+                  placeholder="Street address"
+                />
+                <label htmlFor="checkout-city">City</label>
+                <input
+                  id="checkout-city"
+                  name="city"
+                  autoComplete="address-level2"
+                  required
+                  value={shippingAddress.city}
+                  onChange={(event) => setShippingAddress((address) => ({ ...address, city: event.target.value }))}
+                  placeholder="City"
+                />
+                <label htmlFor="checkout-state">State / Province</label>
+                <input
+                  id="checkout-state"
+                  name="state"
+                  autoComplete="address-level1"
+                  required
+                  value={shippingAddress.state}
+                  onChange={(event) => setShippingAddress((address) => ({ ...address, state: event.target.value }))}
+                  placeholder="State or province"
+                />
+                <label htmlFor="checkout-postal-code">Postal code</label>
+                <input
+                  id="checkout-postal-code"
+                  name="postal_code"
+                  autoComplete="postal-code"
+                  required
+                  value={shippingAddress.postal_code}
+                  onChange={(event) => setShippingAddress((address) => ({ ...address, postal_code: event.target.value }))}
+                  placeholder="Postal code"
+                />
+                <label htmlFor="checkout-country">Country</label>
+                <input
+                  id="checkout-country"
+                  name="country"
+                  autoComplete="country-name"
+                  required
+                  value={shippingAddress.country}
+                  onChange={(event) => setShippingAddress((address) => ({ ...address, country: event.target.value }))}
+                  placeholder="Country"
+                />
                 {checkoutError && <p className="checkout-error" role="alert">{checkoutError}</p>}
                 <button className="button black-button checkout" type="submit" disabled={submitting || cartBusy || cartSyncing}>
                   {submitting ? 'Placing order...' : cartSyncing ? 'Syncing cart...' : 'Place Order'} <ArrowRight size={18} />
@@ -837,11 +873,10 @@ export default function App() {
   const [cartId, setCartId] = useState('');
   const [cartSyncing, setCartSyncing] = useState(true);
   const [cartSynced, setCartSynced] = useState(false);
+  const [cartRetryKey, setCartRetryKey] = useState(0);
   const [cartError, setCartError] = useState('');
   const [pendingCartActions, setPendingCartActions] = useState(0);
   const [storageError, setStorageError] = useState('');
-  const storedCartRef = useRef<CartItem[]>([]);
-  const cartSyncPromiseRef = useRef<Promise<void> | null>(null);
   const cartBusy = pendingCartActions > 0;
 
   const retryCatalog = useCallback(() => setReloadKey((key) => key + 1), []);
@@ -865,9 +900,8 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const savedCart = readStoredCart();
-      storedCartRef.current = savedCart;
-      setCart(savedCart);
+      localStorage.removeItem('shop-cart');
+      setCart([]);
       setCartId(getOrCreateCartId());
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : 'Unable to read the saved cart.');
@@ -881,19 +915,13 @@ export default function App() {
       if (cartReady) setCartSyncing(false);
       return;
     }
-    if (cartSyncPromiseRef.current) return;
 
     const syncCart = async () => {
       setCartSyncing(true);
+      setCartSynced(false);
       setCartError('');
       try {
-        let serverCart = await getCart(cartId);
-        if (serverCart.length === 0 && storedCartRef.current.length > 0) {
-          for (const item of storedCartRef.current) {
-            await addCartItemRequest(cartId, item.id, item.quantity, item.size);
-          }
-          serverCart = await getCart(cartId);
-        }
+        const serverCart = await getCart(cartId);
         setCart(serverCart.map((item) => ({
           ...item.product,
           cartItemId: item.cartItemId,
@@ -902,28 +930,15 @@ export default function App() {
         })));
         setCartSynced(true);
       } catch (error) {
+        setCart([]);
         setCartError(error instanceof Error ? error.message : 'Unable to sync your cart.');
       } finally {
         setCartSyncing(false);
       }
     };
 
-    const syncRequest = syncCart();
-    cartSyncPromiseRef.current = syncRequest;
-    void syncRequest.finally(() => {
-      if (cartSyncPromiseRef.current === syncRequest) cartSyncPromiseRef.current = null;
-    });
-  }, [cartId, cartReady]);
-
-  useEffect(() => {
-    if (!cartReady || !cartSynced) return;
-    try {
-      localStorage.setItem('shop-cart', JSON.stringify(cart));
-      setStorageError('');
-    } catch (error) {
-      setStorageError(error instanceof Error ? error.message : 'Unable to save the cart in this browser.');
-    }
-  }, [cart, cartReady, cartSynced]);
+    void syncCart();
+  }, [cartId, cartReady, cartRetryKey]);
 
   useEffect(() => {
     if (!cartReady || loading || catalogError || products.length === 0) return;
@@ -931,7 +946,12 @@ export default function App() {
     setCart((items) => items.map((item) => {
       const currentProduct = productsById.get(item.id);
       return currentProduct
-        ? { ...currentProduct, quantity: item.quantity, size: item.size }
+        ? {
+          ...currentProduct,
+          cartItemId: item.cartItemId,
+          quantity: item.quantity,
+          size: item.size,
+        }
         : item;
     }));
   }, [products, cartReady, loading, catalogError]);
@@ -942,15 +962,7 @@ export default function App() {
       setCartError(`${product.name} is out of stock.`);
       return;
     }
-    if (cartSyncing) {
-      const currentSync = cartSyncPromiseRef.current;
-      if (!currentSync) {
-        setCartError('Your cart is still syncing. Please try again in a moment.');
-        return;
-      }
-      await currentSync;
-    }
-    if (!cartId) {
+    if (cartSyncing || !cartSynced || !cartId) {
       setCartError('Your cart is still syncing. Please try again in a moment.');
       return;
     }
@@ -1031,9 +1043,17 @@ export default function App() {
     }
   };
 
-  const checkout = async (customerName: string, items: CartItem[]) => {
+  const checkout = async (
+    customerName: string,
+    shippingAddress: ShippingAddress,
+    items: CartItem[],
+    totalAmount: number
+  ) => {
     const result = await createCheckoutOrder(
+      cartId,
       customerName,
+      totalAmount,
+      shippingAddress,
       items.map(({ id, quantity, size }) => ({
         product_id: id,
         quantity,
@@ -1055,6 +1075,7 @@ export default function App() {
   };
 
   const catalogProps = { products, loading, error: catalogError, onRetry: retryCatalog };
+  const retryCartSync = useCallback(() => setCartRetryKey((key) => key + 1), []);
   return (
     <BrowserRouter>
       <Layout
@@ -1063,6 +1084,7 @@ export default function App() {
         cartError={cartError}
         cartSyncing={cartSyncing}
         cartBusy={cartBusy}
+        onRetryCartSync={retryCartSync}
       >
         <Routes>
           <Route path="/" element={<Home {...catalogProps} onAdd={addToCart} />} />

@@ -1,12 +1,16 @@
 import { getStorefrontImage, type Product } from '@/data';
 
-const configuredApiBaseUrl =
-  import.meta.env.VITE_API_URL?.trim() ||
-  (import.meta.env.DEV
-    ? 'http://localhost:5000'
-    : 'https://shop-co-backend-g1hg.vercel.app');
-const markdownUrl = configuredApiBaseUrl.match(/https?:\/\/[^\s)]+/i)?.[0];
-const cleanedApiBaseUrl = (markdownUrl ?? configuredApiBaseUrl)
+const configuredApiBaseUrl = import.meta.env.VITE_API_URL?.trim();
+const isLocalApiUrl = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/api)?\/?$/i.test(
+  configuredApiBaseUrl || ''
+);
+const useDevProxy = import.meta.env.DEV && !isLocalApiUrl;
+const backendUrl = useDevProxy
+  ? 'http://127.0.0.1:5000'
+  : configuredApiBaseUrl ||
+    (import.meta.env.DEV ? 'http://127.0.0.1:5000' : 'https://shop-co-backend-g1hg.vercel.app');
+const markdownUrl = backendUrl.match(/https?:\/\/[^\s)]+/i)?.[0];
+const cleanedApiBaseUrl = (markdownUrl ?? backendUrl)
   .split('[').join('')
   .split(']').join('')
   .split('(').join('')
@@ -16,7 +20,7 @@ const isGenericVercelHost = /^https?:\/\/(?:www\.)?vercel\.app(?:\/api)?\/?$/i.t
 const backendBaseUrl = (isGenericVercelHost ? 'https://shop-co-backend-g1hg.vercel.app' : cleanedApiBaseUrl)
   .replace(/\/+$/, '')
   .replace(/\/api$/i, '');
-const API_BASE_URL = `${backendBaseUrl}/api`;
+const API_BASE_URL = useDevProxy ? '/api' : `${backendBaseUrl}/api`;
 
 export function getBackendAssetUrl(path: string): string {
   const assetPath = path.trim();
@@ -298,10 +302,30 @@ export type CheckoutItem = {
   size: string;
 };
 
-export async function createCheckoutOrder(customerName: string, items: CheckoutItem[]) {
+export type ShippingAddress = {
+  address_line1: string;
+  city: string;
+  state: string;
+  postal_code: string;
+  country: string;
+};
+
+export async function createCheckoutOrder(
+  cartId: string,
+  customerName: string,
+  totalAmount: number,
+  shippingAddress: ShippingAddress,
+  items: CheckoutItem[]
+) {
   const payload = await request('/orders/checkout', undefined, {
     method: 'POST',
-    body: JSON.stringify({ customer_name: customerName, items }),
+    body: JSON.stringify({
+      cart_id: cartId,
+      customer_name: customerName,
+      total_amount: totalAmount,
+      shipping_address: shippingAddress,
+      items,
+    }),
   });
 
   if (

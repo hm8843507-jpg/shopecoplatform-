@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BrowserRouter,
   Link,
+  Navigate,
   NavLink,
   Route,
   Routes,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -28,10 +30,28 @@ import {
   Check,
 } from 'lucide-react';
 import { getDiscount, type Product } from '@/data';
-import { createCheckoutOrder, getProductById, getProducts } from '@/services/api';
+import {
+  addCartItem as addCartItemRequest,
+  createCheckoutOrder,
+  getCart,
+  getMyOrders,
+  getProductById,
+  getProducts,
+  type CustomerOrder,
+  removeCartItem as removeCartItemRequest,
+  updateCartItem as updateCartItemRequest,
+} from '@/services/api';
+import { useAuth } from '@/context/useAuth';
 import '@/index.css';
 
-type CartItem = Product & { quantity: number; size: string };
+type CartItem = Product & { cartItemId?: string; quantity: number; size: string };
+type ShippingAddress = {
+  address_line1: string;
+  city: string;
+  state: string;
+  postal_code: string;
+  country: string;
+};
 type CatalogProps = {
   products: Product[];
   loading: boolean;
@@ -39,34 +59,29 @@ type CatalogProps = {
   onRetry: () => void;
 };
 
-function readStoredCart(): CartItem[] {
-  const raw = localStorage.getItem('shop-cart');
-  if (!raw) return [];
+function getOrCreateCartId(userId: string): string {
+  const storageKey = `shop-cart-id:${userId}`;
+  const storedId = localStorage.getItem(storageKey);
+  if (storedId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storedId)) {
+    return storedId.toLowerCase();
+  }
 
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed)) throw new Error('Saved cart data is invalid.');
+  const legacyId = localStorage.getItem('shop-cart-id');
+  const cartId = legacyId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(legacyId)
+    ? legacyId.toLowerCase()
+    : crypto.randomUUID();
+  localStorage.setItem(storageKey, cartId);
+  localStorage.removeItem('shop-cart-id');
+  return cartId;
+}
 
-  return parsed.map((item: unknown) => {
-    if (
-      typeof item !== 'object' ||
-      item === null ||
-      !('id' in item) ||
-      typeof item.id !== 'string' ||
-      !('name' in item) ||
-      typeof item.name !== 'string' ||
-      !('price' in item) ||
-      typeof item.price !== 'number' ||
-      !('quantity' in item) ||
-      typeof item.quantity !== 'number' ||
-      !Number.isInteger(item.quantity) ||
-      item.quantity < 1 ||
-      !('size' in item) ||
-      typeof item.size !== 'string'
-    ) {
-      throw new Error('Saved cart data is invalid. Clear the browser cart and try again.');
-    }
-    return item as CartItem;
-  });
+function toCartItem(line: Awaited<ReturnType<typeof getCart>>[number]): CartItem {
+  return {
+    ...line.product,
+    cartItemId: line.cartItemId,
+    quantity: line.quantity,
+    size: line.size,
+  };
 }
 
 function Stars({ rating }: { rating: number }) {
@@ -87,6 +102,7 @@ function Stars({ rating }: { rating: number }) {
 function Header({ cartCount, onMenu }: { cartCount: number; onMenu: () => void }) {
   const [search, setSearch] = useState('');
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
   return (
     <>
@@ -125,9 +141,10 @@ function Header({ cartCount, onMenu }: { cartCount: number; onMenu: () => void }
             <ShoppingCart size={23} />
             {cartCount > 0 && <b>{cartCount}</b>}
           </Link>
-          <button className="action-icon desktop-only" aria-label="Account">
+          <Link to={user ? '/orders' : '/login'} className="action-icon desktop-only" aria-label={user ? 'Order history' : 'Sign in'}>
             <CircleUserRound size={23} />
-          </button>
+          </Link>
+          {user && <button className="desktop-only account-logout" onClick={logout}>Sign out</button>}
         </div>
       </header>
     </>
@@ -166,6 +183,7 @@ function Layout({
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { user, error: authError, logout } = useAuth();
   return (
     <>
       <Header
@@ -179,9 +197,12 @@ function Layout({
           <Link onClick={() => setMenuOpen(false)} to="/shop?onSale=true">On Sale</Link>
           <Link onClick={() => setMenuOpen(false)} to="/shop?sort=newest">New Arrivals</Link>
           <Link onClick={() => setMenuOpen(false)} to="/shop?view=brands">Brands</Link>
+          <Link onClick={() => setMenuOpen(false)} to={user ? '/orders' : '/login'}>{user ? 'My Orders' : 'Sign In'}</Link>
+          {user && <button onClick={() => { logout(); setMenuOpen(false); }}>Sign Out</button>}
         </div>
       )}
       {storageError && <p className="state-message error-message shell" role="alert">{storageError}</p>}
+      {authError && <p className="state-message error-message shell" role="alert">{authError}</p>}
       {children}
       <Footer />
     </>
@@ -670,26 +691,39 @@ function ProductPage({ onAdd }: { onAdd: (product: Product, size: string, quanti
 
 function CartPage({
   cart,
-  setCart,
+  onRemove,
+  onUpdateQuantity,
   onCheckout,
 }: {
   cart: CartItem[];
-  setCart: Dispatch<SetStateAction<CartItem[]>>;
-  onCheckout: (customerName: string, items: CartItem[]) => Promise<string>;
+  onRemove: (item: CartItem) => void;
+  onUpdateQuantity: (item: CartItem, amount: number) => void;
+  onCheckout: (customerName: string, address: ShippingAddress, items: CartItem[]) => Promise<string>;
 }) {
-  const [customerName, setCustomerName] = useState('');
+  const { user } = useAuth();
+  const [customerName, setCustomerName] = useState(user?.name || '');
+  const [address, setAddress] = useState({
+    address_line1: '',
+    city: '',
+    state: '',
+    postal_code: '',
+    country: '',
+  });
   const [checkoutError, setCheckoutError] = useState('');
   const [orderConfirmation, setOrderConfirmation] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const discount = subtotal * 0.2;
   const total = subtotal - discount + (subtotal ? 15 : 0);
+  useEffect(() => {
+    if (user?.name) setCustomerName(user.name);
+  }, [user?.name]);
   const handleCheckout = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setCheckoutError('');
     setSubmitting(true);
     try {
-      const orderId = await onCheckout(customerName.trim(), cart);
+      const orderId = await onCheckout(customerName.trim(), address, cart);
       setOrderConfirmation(`Order ${orderId} was placed successfully.`);
       setCustomerName('');
     } catch (error) {
@@ -698,23 +732,6 @@ function CartPage({
       setSubmitting(false);
     }
   };
-  const updateQuantity = (id: string, size: string, amount: number) =>
-    setCart((items) => {
-      const selectedItem = items.find((item) => item.id === id && item.size === size);
-      if (!selectedItem) return items;
-      const productQuantity = items
-        .filter((item) => item.id === id)
-        .reduce((sum, item) => sum + item.quantity, 0);
-      if (amount > 0 && selectedItem.stock !== undefined && productQuantity >= selectedItem.stock) {
-        return items;
-      }
-      return items.map((item) =>
-        item.id === id && item.size === size
-          ? { ...item, quantity: Math.max(1, item.quantity + amount) }
-          : item
-      );
-    });
-
   return (
     <main>
       <Breadcrumb current="Cart" />
@@ -729,14 +746,14 @@ function CartPage({
               <div className="cart-item" key={`${item.id}-${item.size}`}>
                 <img src={item.image} alt={item.name} />
                 <div className="cart-item-info"><Link to={`/product/${encodeURIComponent(item.id)}`}><h3>{item.name}</h3></Link><span>Size: {item.size}</span><span>Color: {item.color}</span><strong>${item.price.toFixed(2)}</strong></div>
-                <button className="delete-item" aria-label={`Remove ${item.name}`} onClick={() => setCart((items) => items.filter((current) => current.id !== item.id || current.size !== item.size))}><Trash2 size={19} /></button>
+                <button className="delete-item" aria-label={`Remove ${item.name}`} onClick={() => onRemove(item)}><Trash2 size={19} /></button>
                 <div className="quantity cart-quantity">
-                  <button aria-label="Decrease quantity" onClick={() => updateQuantity(item.id, item.size, -1)}><Minus size={15} /></button>
+                  <button aria-label="Decrease quantity" onClick={() => onUpdateQuantity(item, -1)}><Minus size={15} /></button>
                   <span>{item.quantity}</span>
                   <button
                     aria-label="Increase quantity"
                     disabled={item.stock !== undefined && cart.filter((entry) => entry.id === item.id).reduce((sum, entry) => sum + entry.quantity, 0) >= item.stock}
-                    onClick={() => updateQuantity(item.id, item.size, 1)}
+                    onClick={() => onUpdateQuantity(item, 1)}
                   ><Plus size={15} /></button>
                 </div>
               </div>
@@ -760,6 +777,14 @@ function CartPage({
                   onChange={(event) => setCustomerName(event.target.value)}
                   placeholder="Enter your full name"
                 />
+                <label htmlFor="checkout-address">Shipping address</label>
+                <input id="checkout-address" autoComplete="address-line1" required value={address.address_line1} onChange={(event) => setAddress({ ...address, address_line1: event.target.value })} placeholder="Street address" />
+                <div className="address-fields">
+                  <input aria-label="City" autoComplete="address-level2" required value={address.city} onChange={(event) => setAddress({ ...address, city: event.target.value })} placeholder="City" />
+                  <input aria-label="State or province" autoComplete="address-level1" required value={address.state} onChange={(event) => setAddress({ ...address, state: event.target.value })} placeholder="State / Province" />
+                  <input aria-label="Postal code" autoComplete="postal-code" required value={address.postal_code} onChange={(event) => setAddress({ ...address, postal_code: event.target.value })} placeholder="Postal code" />
+                  <input aria-label="Country" autoComplete="country-name" required value={address.country} onChange={(event) => setAddress({ ...address, country: event.target.value })} placeholder="Country" />
+                </div>
                 {checkoutError && <p className="checkout-error" role="alert">{checkoutError}</p>}
                 <button className="button black-button checkout" type="submit" disabled={submitting}>
                   {submitting ? 'Placing order...' : 'Place Order'} <ArrowRight size={18} />
@@ -773,7 +798,130 @@ function CartPage({
   );
 }
 
-export default function App() {
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <p className="state-message" role="status">Restoring your account...</p>;
+  if (!user) {
+    const redirect = encodeURIComponent(`${location.pathname}${location.search}`);
+    return <Navigate to={`/login?redirect=${redirect}`} replace />;
+  }
+  return children;
+}
+
+function AuthPage({ mode }: { mode: 'login' | 'register' }) {
+  const { user, loading, login, register } = useAuth();
+  const [searchParams] = useSearchParams();
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [formError, setFormError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const navigate = useNavigate();
+  const redirect = searchParams.get('redirect');
+  const destination = redirect?.startsWith('/') && !redirect.startsWith('//') ? redirect : '/';
+
+  useEffect(() => {
+    if (!loading && user) navigate(destination, { replace: true });
+  }, [destination, loading, navigate, user]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError('');
+    setSubmitting(true);
+    try {
+      if (mode === 'register') await register(name.trim(), email.trim(), password);
+      else await login(email.trim(), password);
+      navigate(destination, { replace: true });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Unable to authenticate.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) return <p className="state-message" role="status">Restoring your account...</p>;
+  return (
+    <main className="shell auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <h1>{mode === 'login' ? 'Welcome back' : 'Create your account'}</h1>
+        <p>{mode === 'login' ? 'Sign in to sync your cart and manage your orders.' : 'Register to save your cart and track your orders.'}</p>
+        {mode === 'register' && (
+          <label>
+            Full name
+            <input autoComplete="name" required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+        )}
+        <label>
+          Email
+          <input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
+        </label>
+        <label>
+          Password
+          <input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={(event) => setPassword(event.target.value)} />
+        </label>
+        {formError && <p className="checkout-error" role="alert">{formError}</p>}
+        <button className="button black-button" type="submit" disabled={submitting}>
+          {submitting ? 'Please wait...' : mode === 'login' ? 'Sign In' : 'Create Account'}
+        </button>
+        <p className="auth-switch">
+          {mode === 'login' ? 'New to Shop.co?' : 'Already have an account?'}{' '}
+          <Link to={`/${mode === 'login' ? 'register' : 'login'}${redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''}`}>
+            {mode === 'login' ? 'Create an account' : 'Sign in'}
+          </Link>
+        </p>
+      </form>
+    </main>
+  );
+}
+
+function OrderHistory() {
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getMyOrders(controller.signal)
+      .then(setOrders)
+      .catch((requestError: unknown) => {
+        if (!(requestError instanceof DOMException && requestError.name === 'AbortError')) {
+          setError(requestError instanceof Error ? requestError.message : 'Unable to load your orders.');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  return (
+    <main className="shell order-history">
+      <div className="section-heading"><h1>MY ORDERS</h1><Link className="outline-button" to="/shop">Continue shopping</Link></div>
+      {loading && <p className="state-message" role="status">Loading your orders...</p>}
+      {error && <p className="state-message error-message" role="alert">{error}</p>}
+      {!loading && !error && !orders.length && <div className="empty-cart"><h2>No orders yet</h2><p>Your completed purchases will appear here.</p></div>}
+      <div className="order-list">
+        {orders.map((order) => (
+          <article className="order-card" key={order.id}>
+            <div className="order-card-heading">
+              <div><h2>{order.order_id}</h2><span>{order.created_at ? new Date(order.created_at).toLocaleDateString() : ''}</span></div>
+              <span className={`order-status status-${order.status.toLowerCase()}`}>{order.status}</span>
+            </div>
+            <p>{order.items.map((item) => `${item.name} × ${item.quantity}${item.size ? ` (${item.size})` : ''}`).join(', ')}</p>
+            <strong>Total: ${order.total_amount.toFixed(2)}</strong>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+
+function Storefront() {
+  const { user, loading: authLoading } = useAuth();
+  const userId = user?.id;
+  const navigate = useNavigate();
+  const location = useLocation();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [catalogError, setCatalogError] = useState('');
@@ -781,6 +929,8 @@ export default function App() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [cartReady, setCartReady] = useState(false);
   const [storageError, setStorageError] = useState('');
+  const [cartId, setCartId] = useState('');
+  const cartRevision = useRef(0);
 
   const retryCatalog = useCallback(() => setReloadKey((key) => key + 1), []);
 
@@ -802,24 +952,44 @@ export default function App() {
   }, [reloadKey]);
 
   useEffect(() => {
+    if (authLoading) return;
+    let active = true;
+    const revision = ++cartRevision.current;
+    if (!userId) {
+      setCart([]);
+      setCartId('');
+      setStorageError('');
+      setCartReady(true);
+      return () => { active = false; };
+    }
+
     try {
-      setCart(readStoredCart());
+      setCartReady(false);
+      const currentCartId = getOrCreateCartId(userId);
+      setCartId(currentCartId);
+      void getCart(currentCartId)
+        .then((lines) => {
+          if (!active || cartRevision.current !== revision) return;
+          setCart(lines.map(toCartItem));
+          setStorageError('');
+        })
+        .catch((error: unknown) => {
+          if (!active || cartRevision.current !== revision) return;
+          setCart([]);
+          setStorageError(error instanceof Error ? error.message : 'Unable to load your cart.');
+        })
+        .finally(() => {
+          if (active) setCartReady(true);
+        });
     } catch (error) {
-      setStorageError(error instanceof Error ? error.message : 'Unable to read the saved cart.');
-    } finally {
+      setStorageError(error instanceof Error ? error.message : 'Unable to initialize your cart.');
       setCartReady(true);
     }
-  }, []);
 
-  useEffect(() => {
-    if (!cartReady) return;
-    try {
-      localStorage.setItem('shop-cart', JSON.stringify(cart));
-      setStorageError('');
-    } catch (error) {
-      setStorageError(error instanceof Error ? error.message : 'Unable to save the cart in this browser.');
-    }
-  }, [cart, cartReady]);
+    return () => {
+      active = false;
+    };
+  }, [userId, authLoading]);
 
   useEffect(() => {
     if (!cartReady || loading || catalogError || products.length === 0) return;
@@ -827,29 +997,105 @@ export default function App() {
     setCart((items) => items.map((item) => {
       const currentProduct = productsById.get(item.id);
       return currentProduct
-        ? { ...currentProduct, quantity: item.quantity, size: item.size }
+        ? {
+          ...currentProduct,
+          cartItemId: item.cartItemId,
+          quantity: item.quantity,
+          size: item.size,
+        }
         : item;
     }));
   }, [products, cartReady, loading, catalogError]);
 
-  const addToCart = (product: Product, size?: string, quantity = 1) => {
+  const addToCart = async (product: Product, size?: string, quantity = 1) => {
+    if (!user) {
+      const redirect = encodeURIComponent(`${location.pathname}${location.search}`);
+      navigate(`/login?redirect=${redirect}`);
+      return;
+    }
+    if (!cartId) {
+      setStorageError('Your cart is still loading. Please try again in a moment.');
+      return;
+    }
     const selectedSize = size || product.sizes[1] || product.sizes[0] || 'One size';
-    if (product.stock !== undefined && product.stock < 1) return;
-    setCart((current) => {
-      const match = current.find((item) => item.id === product.id && item.size === selectedSize);
-      const nextQuantity = current
-        .filter((item) => item.id === product.id)
-        .reduce((sum, item) => sum + item.quantity, quantity);
-      if (product.stock !== undefined && nextQuantity > product.stock) return current;
-      return match
-        ? current.map((item) => item === match ? { ...item, quantity: item.quantity + quantity } : item)
-        : [...current, { ...product, quantity, size: selectedSize }];
-    });
+    if (product.stock !== undefined && product.stock < 1) {
+      setStorageError(`${product.name} is out of stock.`);
+      return;
+    }
+
+    setStorageError('');
+    const revision = ++cartRevision.current;
+    try {
+      const savedLine = await addCartItemRequest(cartId, product.id, quantity, selectedSize);
+      setCart((items) => [
+        ...items.filter((item) => item.id !== savedLine.product.id || item.size !== savedLine.size),
+        toCartItem(savedLine),
+      ]);
+      setStorageError('');
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to add this item to your cart.');
+    } finally {
+      if (revision === cartRevision.current) setCartReady(true);
+    }
   };
 
-  const checkout = async (customerName: string, items: CartItem[]) => {
+  const removeFromCart = async (item: CartItem) => {
+    if (!user || !cartId) return;
+    setStorageError('');
+    const revision = ++cartRevision.current;
+    try {
+      let cartItemId = item.cartItemId;
+      if (!cartItemId) {
+        const lines = await getCart(cartId);
+        cartItemId = lines.find((line) => line.product.id === item.id && line.size === item.size)?.cartItemId;
+      }
+      if (!cartItemId) {
+        throw new Error('This item is no longer in your saved cart. Refresh the page and try again.');
+      }
+
+      await removeCartItemRequest(cartId, cartItemId);
+      setCart((items) => items.filter((current) => current.cartItemId !== cartItemId));
+      setStorageError('');
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to remove this item from your cart.');
+    } finally {
+      if (revision === cartRevision.current) setCartReady(true);
+    }
+  };
+
+  const updateCartQuantity = async (item: CartItem, amount: number) => {
+    if (!user || !cartId) return;
+    if (!item.cartItemId) {
+      setStorageError('This item is still syncing. Please try again.');
+      return;
+    }
+    const quantity = Math.max(1, item.quantity + amount);
+    if (quantity === item.quantity) return;
+
+    setStorageError('');
+    const revision = ++cartRevision.current;
+    try {
+      const savedLine = await updateCartItemRequest(cartId, item.cartItemId, quantity);
+      setCart((items) => items.map((current) =>
+        current.cartItemId === savedLine.cartItemId ? toCartItem(savedLine) : current
+      ));
+      setStorageError('');
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to update your cart.');
+    } finally {
+      if (revision === cartRevision.current) setCartReady(true);
+    }
+  };
+
+  const checkout = async (customerName: string, address: ShippingAddress, items: CartItem[]) => {
+    if (!user || !cartId) throw new Error('Please sign in before placing your order.');
+    const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const total = Number((subtotal - subtotal * 0.2 + (subtotal ? 15 : 0)).toFixed(2));
     const result = await createCheckoutOrder(
       customerName,
+      cartId,
+      total,
+      address,
       items.map(({ id, quantity, size }) => ({
         product_id: id,
         quantity,
@@ -857,22 +1103,44 @@ export default function App() {
       }))
     );
     setCart([]);
+    if (!result.cartCleared) {
+      setStorageError('Your order was placed, but the server could not clear your cart. Please contact support before trying again.');
+    }
     return result.orderId;
   };
 
   const catalogProps = { products, loading, error: catalogError, onRetry: retryCatalog };
   return (
-    <BrowserRouter>
       <Layout cart={cart} storageError={storageError}>
         <Routes>
           <Route path="/" element={<Home {...catalogProps} onAdd={addToCart} />} />
           <Route path="/shop" element={<Shop {...catalogProps} onAdd={addToCart} />} />
           <Route path="/category" element={<Shop {...catalogProps} onAdd={addToCart} />} />
           <Route path="/product/:id" element={<ProductPage onAdd={addToCart} />} />
-          <Route path="/cart" element={<CartPage cart={cart} setCart={setCart} onCheckout={checkout} />} />
+          <Route
+            path="/cart"
+            element={<RequireAuth>{(
+              <CartPage
+                cart={cart}
+                onRemove={removeFromCart}
+                onUpdateQuantity={updateCartQuantity}
+                onCheckout={checkout}
+              />
+            )}</RequireAuth>}
+          />
+          <Route path="/login" element={<AuthPage mode="login" />} />
+          <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/orders" element={<RequireAuth><OrderHistory /></RequireAuth>} />
           <Route path="*" element={<main className="shell state-message"><p>Page not found.</p><Link to="/" className="outline-button">Go home</Link></main>} />
         </Routes>
       </Layout>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Storefront />
     </BrowserRouter>
   );
 }

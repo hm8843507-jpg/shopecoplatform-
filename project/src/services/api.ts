@@ -3,7 +3,7 @@ import { getStorefrontImage, type Product } from '@/data';
 const configuredApiBaseUrl =
   import.meta.env.VITE_API_URL ||
   import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV ? 'http://localhost:5000/api' : '');
+  (import.meta.env.DEV ? '/api' : '');
 if (!configuredApiBaseUrl) {
   throw new Error('VITE_API_URL must be configured for production.');
 }
@@ -109,7 +109,10 @@ async function request(
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
         Accept: 'application/json',
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(localStorage.getItem('shop-auth-token')
+            ? { Authorization: `Bearer ${localStorage.getItem('shop-auth-token')}` }
+            : {}),
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       },
       signal,
       ...options,
@@ -170,16 +173,204 @@ export async function getProductById(id: string, signal?: AbortSignal): Promise<
   }
 }
 
+export type CartLine = {
+  cartItemId: string;
+  product: Product;
+  quantity: number;
+  size: string;
+};
+
+export type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+};
+
+function toAuthUser(payload: unknown): AuthUser {
+  if (
+    !isRecord(payload) ||
+    (typeof payload.id !== 'string' && typeof payload._id !== 'string') ||
+    typeof payload.name !== 'string' ||
+    typeof payload.email !== 'string'
+  ) {
+    throw new Error('The authentication API returned an invalid user.');
+  }
+  return {
+    id: String(payload.id ?? payload._id),
+    name: payload.name,
+    email: payload.email,
+    role: typeof payload.role === 'string' ? payload.role : 'User',
+  };
+}
+
+function toAuthResult(payload: unknown): { token: string; user: AuthUser } {
+  if (!isRecord(payload) || typeof payload.token !== 'string' || !isRecord(payload.user)) {
+    throw new Error('The authentication API returned an invalid session.');
+  }
+  return { token: payload.token, user: toAuthUser(payload.user) };
+}
+
+export async function login(email: string, password: string) {
+  return toAuthResult(await request('/auth/login', undefined, {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  }));
+}
+
+export async function register(name: string, email: string, password: string) {
+  return toAuthResult(await request('/auth/register', undefined, {
+    method: 'POST',
+    body: JSON.stringify({ name, email, password }),
+  }));
+}
+
+export async function getCurrentUser() {
+  const payload = await request('/auth/me');
+  if (!isRecord(payload) || !isRecord(payload.user)) {
+    throw new Error('The authentication API returned an invalid profile.');
+  }
+  return toAuthUser(payload.user);
+}
+
+export type CustomerOrder = {
+  id: string;
+  order_id: string;
+  created_at?: string;
+  status: string;
+  total_amount: number;
+  items: Array<{ name: string; quantity: number; size: string }>;
+};
+
+export async function getMyOrders(signal?: AbortSignal): Promise<CustomerOrder[]> {
+  const payload = await request('/orders/mine', signal);
+  const orders = Array.isArray(payload) ? payload : isRecord(payload) && Array.isArray(payload.orders) ? payload.orders : null;
+  if (!orders) throw new Error('The orders API returned an invalid order list.');
+  return orders.map((order): CustomerOrder => {
+    if (
+      !isRecord(order) ||
+      typeof order.order_id !== 'string' ||
+      typeof order.status !== 'string' ||
+      !Number.isFinite(Number(order.total_amount)) ||
+      !Array.isArray(order.items)
+    ) {
+      throw new Error('The orders API returned an invalid order.');
+    }
+    return {
+      id: String(order.id ?? order._id ?? order.order_id),
+      order_id: order.order_id,
+      ...(typeof order.created_at === 'string' ? { created_at: order.created_at } : {}),
+      status: order.status,
+      total_amount: Number(order.total_amount),
+      items: order.items.map((item) => ({
+        name: isRecord(item) && typeof item.name === 'string' ? item.name : 'Product',
+        quantity: isRecord(item) && Number.isInteger(item.quantity) ? Number(item.quantity) : 1,
+        size: isRecord(item) && typeof item.size === 'string' ? item.size : '',
+      })),
+    };
+  });
+}
+
+function toCartLine(payload: unknown): CartLine {
+  if (
+    !isRecord(payload) ||
+    (typeof payload.id !== 'string' && typeof payload.id !== 'number') ||
+    !Number.isInteger(payload.quantity) ||
+    Number(payload.quantity) < 1 ||
+    typeof payload.size !== 'string'
+  ) {
+    throw new Error('The cart API returned an invalid item.');
+  }
+
+  return {
+    cartItemId: String(payload.id),
+    product: toProduct(payload.product),
+    quantity: Number(payload.quantity),
+    size: payload.size,
+  };
+}
+
+function getCartLine(payload: unknown): CartLine {
+  if (!isRecord(payload) || !isRecord(payload.item)) {
+    throw new Error('The shop server returned an invalid cart response.');
+  }
+  return toCartLine(payload.item);
+}
+
+export async function getCart(cartId: string): Promise<CartLine[]> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  const payload = await request(`/cart?${query.toString()}`);
+  if (!isRecord(payload) || !Array.isArray(payload.items)) {
+    throw new Error('The shop server returned an invalid cart.');
+  }
+  return payload.items.map(toCartLine);
+}
+
+export async function addCartItem(
+  cartId: string,
+  productId: string,
+  quantity: number,
+  size: string
+): Promise<CartLine> {
+  const payload = await request('/cart', undefined, {
+    method: 'POST',
+    body: JSON.stringify({ cart_id: cartId, product_id: productId, quantity, size }),
+  });
+  return getCartLine(payload);
+}
+
+export async function updateCartItem(
+  cartId: string,
+  itemId: string,
+  quantity: number
+): Promise<CartLine> {
+  const payload = await request(`/cart/${encodeURIComponent(itemId)}`, undefined, {
+    method: 'PUT',
+    body: JSON.stringify({ cart_id: cartId, quantity }),
+  });
+  return getCartLine(payload);
+}
+
+export async function removeCartItem(cartId: string, itemId: string): Promise<void> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  await request(`/cart/${encodeURIComponent(itemId)}?${query.toString()}`, undefined, {
+    method: 'DELETE',
+  });
+}
+
+export async function clearCart(cartId: string): Promise<void> {
+  const query = new URLSearchParams({ cart_id: cartId });
+  await request(`/cart?${query.toString()}`, undefined, { method: 'DELETE' });
+}
+
 export type CheckoutItem = {
   product_id: string;
   quantity: number;
   size: string;
 };
 
-export async function createCheckoutOrder(customerName: string, items: CheckoutItem[]) {
+export async function createCheckoutOrder(
+  customerName: string,
+  cartId: string,
+  totalAmount: number,
+  shippingAddress: {
+    address_line1: string;
+    city: string;
+    state: string;
+    postal_code: string;
+    country: string;
+  },
+  items: CheckoutItem[]
+) {
   const payload = await request('/orders/checkout', undefined, {
     method: 'POST',
-    body: JSON.stringify({ customer_name: customerName, items }),
+    body: JSON.stringify({
+      customer_name: customerName,
+      cart_id: cartId,
+      total_amount: totalAmount,
+      shipping_address: shippingAddress,
+      items,
+    }),
   });
 
   if (
@@ -190,5 +381,8 @@ export async function createCheckoutOrder(customerName: string, items: CheckoutI
     throw new Error('The shop server returned an invalid order confirmation.');
   }
 
-  return { orderId: payload.order.order_id };
+  return {
+    orderId: payload.order.order_id,
+    cartCleared: payload.cart_cleared !== false,
+  };
 }
