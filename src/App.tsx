@@ -981,7 +981,11 @@ function AuthPage({ mode }: { mode: 'login' | 'register' }) {
     } catch (error) {
       const status = error instanceof Error && 'status' in error ? Number(error.status) : undefined;
       if (mode === 'login' && status === 400) {
-        setFormError('Email or password is incorrect. Please check your details and try again.');
+        setFormError(
+          error instanceof Error && /user not found/i.test(error.message)
+            ? 'No account was found for this email. Please check it or create an account.'
+            : 'Email or password is incorrect. Please check your details and try again.'
+        );
       } else if (mode === 'register' && status === 409) {
         setFormError('Account already exists, please log in.');
       } else {
