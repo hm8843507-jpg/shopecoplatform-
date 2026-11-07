@@ -48,6 +48,7 @@ import { useAuth } from '@/context/useAuth';
 import '@/index.css';
 
 type CartItem = Product & { cartItemId?: string; quantity: number; size: string };
+type PendingCartAdd = { product: Product; size: string; quantity: number };
 const imageFallback = '/image-placeholder.svg';
 const cartIdStorageKey = 'shop-cart-id';
 type CatalogProps = {
@@ -1089,6 +1090,7 @@ function Storefront() {
   const [cartRetryKey, setCartRetryKey] = useState(0);
   const [cartError, setCartError] = useState('');
   const [pendingCartActions, setPendingCartActions] = useState(0);
+  const [queuedCartAdds, setQueuedCartAdds] = useState<PendingCartAdd[]>([]);
   const [storageError, setStorageError] = useState(initialGuestCart.error);
   const cartBusy = pendingCartActions > 0;
 
@@ -1119,6 +1121,7 @@ function Storefront() {
       setCartSynced(false);
       setCartSyncing(false);
       setCartError('');
+      setQueuedCartAdds([]);
       setCart((items) => items.map((item) => ({ ...item, cartItemId: undefined })));
       return;
     }
@@ -1188,6 +1191,41 @@ function Storefront() {
     return () => { active = false; };
   }, [authLoading, userId, cartId, cartReady, cartRetryKey]);
 
+  const persistCartAdd = useCallback(async (product: Product, size: string, quantity: number) => {
+    if (!cartId) {
+      setCartError('Your cart is not ready yet. Please try again.');
+      return;
+    }
+
+    setCartError('');
+    setPendingCartActions((count) => count + 1);
+    try {
+      const savedItem = await addCartItemRequest(cartId, product.id, quantity, size);
+      setCart((items) => [
+        ...items.filter((item) => item.id !== savedItem.product.id || item.size !== savedItem.size),
+        {
+          ...savedItem.product,
+          cartItemId: savedItem.cartItemId,
+          quantity: savedItem.quantity,
+          size: savedItem.size,
+        },
+      ]);
+      setCartSynced(true);
+    } catch (error) {
+      setCartError(error instanceof Error ? error.message : 'Unable to add this item to your cart.');
+    } finally {
+      setPendingCartActions((count) => Math.max(0, count - 1));
+    }
+  }, [cartId]);
+
+  useEffect(() => {
+    if (!userId || !cartReady || cartSyncing || !cartSynced || cartBusy || !queuedCartAdds.length) return;
+
+    const [nextAdd, ...remainingAdds] = queuedCartAdds;
+    setQueuedCartAdds(remainingAdds);
+    void persistCartAdd(nextAdd.product, nextAdd.size, nextAdd.quantity);
+  }, [userId, cartReady, cartSyncing, cartSynced, cartBusy, queuedCartAdds, persistCartAdd]);
+
   useEffect(() => {
     if (!cartReady || loading || catalogError || products.length === 0) return;
     const productsById = new Map(products.map((product) => [product.id, product]));
@@ -1228,30 +1266,16 @@ function Storefront() {
       });
       return;
     }
-    if (cartSyncing || !cartSynced || !cartId) {
-      setCartError('Your cart is still syncing. Please try again in a moment.');
+    if (!cartReady || cartSyncing || (!cartSynced && !cartId)) {
+      setCartError('');
+      setQueuedCartAdds((items) => [...items, { product, size: selectedSize, quantity }]);
       return;
     }
-
-    setCartError('');
-    setPendingCartActions((count) => count + 1);
-    try {
-      const savedItem = await addCartItemRequest(cartId, product.id, quantity, selectedSize);
-      setCart((items) => [
-        ...items.filter((item) => item.id !== savedItem.product.id || item.size !== savedItem.size),
-        {
-          ...savedItem.product,
-          cartItemId: savedItem.cartItemId,
-          quantity: savedItem.quantity,
-          size: savedItem.size,
-        },
-      ]);
-      setCartSynced(true);
-    } catch (error) {
-      setCartError(error instanceof Error ? error.message : 'Unable to add this item to your cart.');
-    } finally {
-      setPendingCartActions((count) => Math.max(0, count - 1));
+    if (!cartSynced || !cartId) {
+      setCartError('Your cart could not be synced. Retry cart sync and try again.');
+      return;
     }
+    await persistCartAdd(product, selectedSize, quantity);
   };
 
   const removeFromCart = async (item: CartItem) => {
